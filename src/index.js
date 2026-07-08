@@ -19,6 +19,7 @@ const DEFAULT_BBOX = "26.00,62.40,27.50,63.50"; // Rautalammin reitti pilottialu
 const SYKE_WMS = "https://paikkatiedot.ymparisto.fi/geoserver/inspire_lc/wms";
 const LAYER = "LC.LandCoverSurfaces.2018";
 const FOREST_CLASSES = new Set([311, 312, 313]); // CLC level3: metsätyypit
+const WATER_CLASSES = new Set([511, 512]); // CLC level3: joet/kanavat, järvet — vastaa NDVI:n SCL==6-vesimaskia
 const REF_FOREST_AREA_M2 = 10_000_000; // 10 km² viite "ehjälle" metsälaikulle — dokumentoitu arvio, ei standardi
 
 function json(obj, status = 200) {
@@ -64,63 +65,82 @@ function gridPoints(bboxStr, n) {
   return pts;
 }
 
-async function handleFragmentation(url) {
-  const bbox = url.searchParams.get("bbox") || DEFAULT_BBOX;
-  const n = Math.min(10, parseInt(url.searchParams.get("grid") || "7", 10)); // 7x7=49 pistettä oletuksena, katto 10x10
-  const points = gridPoints(bbox, n);
-
+async function computeFragmentation(bboxStr, n) {
+  const points = gridPoints(bboxStr, n);
   const results = await Promise.all(points.map(([lon, lat]) => fetchLandCoverAtPoint(lon, lat)));
   const valid = results.filter(r => r !== null);
 
   if (valid.length === 0) {
-    return json({ error: "Ei yhtään validia pistettä palautunut SYKE:ltä", bem_component: "D_f", status: "failed" }, 502);
+    throw new Error("Ei yhtään validia pistettä palautunut SYKE:ltä");
   }
 
   const forestHits = valid.filter(r => FOREST_CLASSES.has(r.level3));
   const forestFraction = forestHits.length / valid.length;
 
+  const waterHits = valid.filter(r => WATER_CLASSES.has(r.level3));
+  const waterFraction = waterHits.length / valid.length;
+
   const meanForestArea = forestHits.length > 0
     ? forestHits.reduce((s, r) => s + r.area, 0) / forestHits.length
     : 0;
-  const areaScore = Math.min(1, meanForestArea / REF_FOREST_AREA_M2);
-
-  // D_f: korkea = fragmentoitunut. 0.6 paino metsäosuudelle, 0.4 laikkukoolle.
-  const D_f = Math.max(0, Math.min(1,
-    0.6 * (1 - forestFraction) + 0.4 * (1 - areaScore)
-  ));
 
   const classCounts = {};
   valid.forEach(r => {
     classCounts[r.className || r.level3] = (classCounts[r.className || r.level3] || 0) + 1;
   });
 
-  return json({
-    bem_component: "D_f (fragmentation proxy)",
-    D_f: +D_f.toFixed(3),
-    method: "grid_sample_syke_wms",
+  return {
     grid_size: `${n}x${n}`,
     points_queried: points.length,
     points_valid: valid.length,
     forest_fraction: +forestFraction.toFixed(3),
+    water_fraction: +waterFraction.toFixed(3),
     mean_forest_patch_area_m2: Math.round(meanForestArea),
     ref_forest_area_m2: REF_FOREST_AREA_M2,
     class_distribution: classCounts,
-    source: "SYKE inspire_lc WMS (CorineLandCover2018), no auth required",
-    caveat: "Point-sample proxy, not true patch/edge-density fragmentation analysis"
+    source: "SYKE inspire_lc WMS (CorineLandCover2018), no auth required"
+  };
+}
+
+async function handleFragmentation(url) {
+  const bbox = url.searchParams.get("bbox") || DEFAULT_BBOX;
+  const n = Math.min(10, parseInt(url.searchParams.get("grid") || "7", 10)); // 7x7=49 pistettä oletuksena, katto 10x10
+
+  let corine;
+  try {
+    corine = await computeFragmentation(bbox, n);
+  } catch (e) {
+    return json({ error: e.message, bem_component: "D_f", status: "failed" }, 502);
+  }
+
+  // D_f: korkea = fragmentoitunut. Laikkukoko-komponentti poistettu
+  // (CORINE:n 25 ha minimikartoitusyksikko yleistaa lahekkaiset metsat
+  // yhdeksi valtavaksi polygoniksi, ei erottele todellista fragmentaatiota
+  // - havaittu 2026-07-08, ks. commit-historia). Kaava on nyt suoraan
+  // metsaosuuden komplementti.
+  const D_f = Math.max(0, Math.min(1, 1 - corine.forest_fraction));
+
+  return json({
+    bem_component: "D_f (fragmentation proxy)",
+    D_f: +D_f.toFixed(3),
+    method: "grid_sample_syke_wms",
+    ...corine,
+    caveat: "Point-sample proxy, not true patch/edge-density fragmentation analysis. Patch-size component removed — see /status for detail."
   });
 }
 
 function handleStatus() {
   return json({
     proxy: "aci-corine-proxy",
-    version: "0.2",
+    version: "0.3",
     purpose: "D_f (fragmentation) data source for BEM — Biodiversity Endurance Monitor",
     pilot: "Rautalammin reitti",
     default_bbox: DEFAULT_BBOX,
     routes: {
       "/status": "Proxy status",
       "/fragmentation": "Grid-sampled CORINE D_f proxy · ?bbox=...&grid=7 (n x n points, max 10x10)",
-      "/ndvi": "Sentinel Hub Statistical API — NDVI mean/stDev over bbox · ?bbox=...&months=3"
+      "/ndvi": "Sentinel Hub Statistical API — NDVI mean/stDev over bbox · ?bbox=...&months=3",
+      "/combined": "CORINE + NDVI rinnakkain, ristiintarkistus, yhdistetty D_f · ?bbox=...&grid=7&months=3"
     },
     source: {
       corine: {
@@ -193,28 +213,18 @@ async function getCopernicusToken(env) {
   return data.access_token;
 }
 
-async function handleNDVI(url, env) {
+async function computeNDVI(bboxStr, months, env) {
   if (!env.COPERNICUS_CLIENT_ID || !env.COPERNICUS_CLIENT_SECRET) {
-    return json({
-      error: "COPERNICUS_CLIENT_ID / COPERNICUS_CLIENT_SECRET not configured",
-      hint: "wrangler secret put COPERNICUS_CLIENT_ID (ja _SECRET) tähän Workeriin"
-    }, 500);
+    throw new Error("COPERNICUS_CLIENT_ID / COPERNICUS_CLIENT_SECRET not configured (wrangler secret put ...)");
   }
 
-  const bboxStr = url.searchParams.get("bbox") || DEFAULT_BBOX;
   const [minLon, minLat, maxLon, maxLat] = bboxStr.split(",").map(Number);
-  const months = Math.max(1, Math.min(12, parseInt(url.searchParams.get("months") || "3", 10)));
 
   const now = new Date();
   const to = now.toISOString();
   const from = new Date(now.getTime() - months * 30 * 24 * 3600 * 1000).toISOString();
 
-  let token;
-  try {
-    token = await getCopernicusToken(env);
-  } catch (e) {
-    return json({ error: e.message, step: "oauth_token" }, 502);
-  }
+  const token = await getCopernicusToken(env);
 
   const statsRequest = {
     input: {
@@ -223,61 +233,133 @@ async function handleNDVI(url, env) {
         properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" }
       },
       data: [
-        {
-          type: "sentinel-2-l2a",
-          dataFilter: { maxCloudCoverage: 40, mosaickingOrder: "leastCC" }
-        }
+        { type: "sentinel-2-l2a", dataFilter: { maxCloudCoverage: 40, mosaickingOrder: "leastCC" } }
       ]
     },
     aggregation: {
       timeRange: { from, to },
       aggregationInterval: { of: `P${months * 30}D` },
       evalscript: NDVI_EVALSCRIPT,
-      // JUURISYY LOYTYI (2026-07-08): resx/resy-yksikko maaraytyy CRS:n
-      // mukaan - EPSG:4326:lla (WGS84) yksikko on ASTETTA, ei metria.
-      // Annoin resx/resy:n metreina (10/500/5000), jotka kaikki ylittivat
-      // bbox:n oman leveyden (1.5 astetta) reilusti asteina tulkittuna ->
-      // yksi ainoa pikseli koko bbox:lle joka kerta, sama virhe identtisena.
-      // Korjaus: width/height (pikselimaara) sen sijaan - ei riipu CRS:n
-      // yksikosta ollenkaan.
+      // width/height, ei resx/resy — ks. commit-historia (astevs-metri-yksikkobugi 2026-07-08)
       width: 150,
       height: 240
     }
   };
 
-  try {
-    const r = await fetch("https://sh.dataspace.copernicus.eu/statistics/v1", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Authorization": `Bearer ${token}`
-      },
-      body: JSON.stringify(statsRequest)
-    });
-    if (!r.ok) {
-      return json({ error: `Statistical API: HTTP ${r.status}`, detail: await r.text() }, 502);
-    }
-    const data = await r.json();
-    const interval = data?.data?.[0];
-    const stats = interval?.outputs?.data?.bands?.B0?.stats;
+  const r = await fetch("https://sh.dataspace.copernicus.eu/statistics/v1", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+      "Authorization": `Bearer ${token}`
+    },
+    body: JSON.stringify(statsRequest)
+  });
+  if (!r.ok) {
+    throw new Error(`Statistical API: HTTP ${r.status} ${await r.text()}`);
+  }
+  const data = await r.json();
+  const interval = data?.data?.[0];
+  const stats = interval?.outputs?.data?.bands?.B0?.stats;
 
+  if (!stats) {
+    return { error: "unexpected_response_shape", raw_response: data, time_range: { from, to } };
+  }
+
+  const noDataFraction = stats.sampleCount > 0
+    ? stats.noDataCount / stats.sampleCount
+    : null;
+
+  return {
+    time_range: { from, to },
+    max_cloud_coverage_pct: 40,
+    ndvi_stats: stats,
+    // noDataFraction sisältää veden JA pilvet JA virheelliset arvot yhdessä -
+    // ei puhdas vesiosuus, karkea ylaraja-arvio vertailua varten.
+    no_data_fraction_upper_bound: noDataFraction != null ? +noDataFraction.toFixed(3) : null,
+    source: "Sentinel Hub Statistical API (Copernicus Data Space Ecosystem), Sentinel-2 L2A"
+  };
+}
+
+async function handleNDVI(url, env) {
+  const bboxStr = url.searchParams.get("bbox") || DEFAULT_BBOX;
+  const months = Math.max(1, Math.min(12, parseInt(url.searchParams.get("months") || "3", 10)));
+
+  try {
+    const result = await computeNDVI(bboxStr, months, env);
     return json({
       bem_component: "D_f (NDVI proxy)",
       method: "sentinel_hub_statistical_api",
       bbox: bboxStr,
-      time_range: { from, to },
-      max_cloud_coverage_pct: 40,
-      ndvi_stats: stats || null,
-      raw_response: stats ? undefined : data, // näytä raaka vastaus jos oletettu polku ei löydy — debug
-      source: "Sentinel Hub Statistical API (Copernicus Data Space Ecosystem), Sentinel-2 L2A",
+      ...result,
       caveat: "Cloud-aggregated statistics over full bbox and time window, not a spatial grid — single mean/stDev value for the whole area."
     });
   } catch (e) {
-    return json({ error: e.message, step: "statistics_request" }, 502);
+    return json({ error: e.message, step: "ndvi" }, 502);
   }
 }
 
+// ── Yhdistetty reitti: CORINE + NDVI rinnakkain, ristiintarkistus + D_f ──
+async function handleCombined(url, env) {
+  const bboxStr = url.searchParams.get("bbox") || DEFAULT_BBOX;
+  const n = Math.min(10, parseInt(url.searchParams.get("grid") || "7", 10));
+  const months = Math.max(1, Math.min(12, parseInt(url.searchParams.get("months") || "3", 10)));
+
+  const [corineResult, ndviResult] = await Promise.allSettled([
+    computeFragmentation(bboxStr, n),
+    computeNDVI(bboxStr, months, env)
+  ]);
+
+  const corine = corineResult.status === "fulfilled" ? corineResult.value : null;
+  const ndvi = ndviResult.status === "fulfilled" ? ndviResult.value : null;
+  const errors = {};
+  if (corineResult.status === "rejected") errors.corine = corineResult.reason.message;
+  if (ndviResult.status === "rejected") errors.ndvi = ndviResult.reason.message;
+
+  // Ristiintarkistus: CORINE:n oma vesiosuus vs. NDVI:n noData-ylaraja
+  // (joka sisaltaa veden LISAKSI pilvet ja virheelliset pikselit - ei
+  // puhdas vesiosuus, siksi vain "samaa suuruusluokkaa" -tarkistus,
+  // ei tarkka yhtasuuruus).
+  let crossCheck = null;
+  if (corine && ndvi && ndvi.no_data_fraction_upper_bound != null) {
+    crossCheck = {
+      corine_water_fraction: corine.water_fraction,
+      ndvi_no_data_fraction_upper_bound: ndvi.no_data_fraction_upper_bound,
+      plausible: ndvi.no_data_fraction_upper_bound >= corine.water_fraction - 0.05,
+      note: "NDVI-arvo sisältää veden lisäksi pilvet ja virheelliset pikselit — sen pitäisi olla >= CORINE:n vesiosuus, ei täsmälleen sama."
+    };
+  }
+
+  // D_f: metsäosuus (CORINE) + NDVI-hajonta (heterogeenisuussignaali).
+  // Laikkukoko-komponentti poistettu (ks. /fragmentation-kommentit).
+  // NDVI stDev normalisoitu: 0.30 = tyypillinen yläraja luonnontilaiselle
+  // vaihtelulle, tätä korkeampi -> 1.0. Dokumentoitu arvio, ei standardi.
+  let D_f = null;
+  const components = {};
+  if (corine) {
+    components.forest_component = +(1 - corine.forest_fraction).toFixed(3);
+  }
+  if (ndvi && ndvi.ndvi_stats) {
+    components.heterogeneity_component = +Math.min(1, ndvi.ndvi_stats.stDev / 0.30).toFixed(3);
+  }
+  if (components.forest_component != null && components.heterogeneity_component != null) {
+    D_f = +(0.6 * components.forest_component + 0.4 * components.heterogeneity_component).toFixed(3);
+  } else if (components.forest_component != null) {
+    D_f = components.forest_component; // NDVI epäonnistui, käytä vain CORINE:a
+  }
+
+  return json({
+    bem_component: "D_f (combined proxy)",
+    D_f,
+    D_f_components: components,
+    bbox: bboxStr,
+    corine,
+    ndvi,
+    cross_check: crossCheck,
+    errors: Object.keys(errors).length ? errors : null,
+    caveat: "D_f yhdistää kaksi riippumatonta, molemmat vielä proxy-tasoisia signaalia — ei validoitu todellista fragmentaatiomittausta vasten. Katso corine/ndvi-kentät raakadataa varten."
+  });
+}
 
 export default {
   async fetch(request, env) {
@@ -299,6 +381,8 @@ export default {
         return await handleFragmentation(url);
       } else if (path === "/ndvi") {
         return await handleNDVI(url, env);
+      } else if (path === "/combined") {
+        return await handleCombined(url, env);
       } else {
         return json({ error: `Unknown route: ${path}` }, 404);
       }
