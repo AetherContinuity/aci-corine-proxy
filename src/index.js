@@ -104,7 +104,13 @@ async function computeFragmentation(bboxStr, n) {
 
 async function handleFragmentation(url) {
   const bbox = url.searchParams.get("bbox") || DEFAULT_BBOX;
-  const n = Math.min(10, parseInt(url.searchParams.get("grid") || "7", 10)); // 7x7=49 pistettä oletuksena, katto 10x10
+  // Katto 7 (49 pistettä), EI 10 (100 pistetta) - Cloudflare Workers
+  // -ilmaistaso: 50 ulkoisen subrequestin raja per suoritus. grid=10
+  // olisi yksinaankin ylittanyt taman (havaittu 2026-07-08 /combined-
+  // reitin virheenjaljityksen yhteydessa, korjattu tanne samalla vaikka
+  // ei viela ollut itse aiheuttanut virhetta koska kukaan ei ollut
+  // pyytanyt grid=10:ta).
+  const n = Math.min(7, parseInt(url.searchParams.get("grid") || "7", 10));
 
   let corine;
   try {
