@@ -302,7 +302,13 @@ async function handleNDVI(url, env) {
 // ── Yhdistetty reitti: CORINE + NDVI rinnakkain, ristiintarkistus + D_f ──
 async function handleCombined(url, env) {
   const bboxStr = url.searchParams.get("bbox") || DEFAULT_BBOX;
-  const n = Math.min(10, parseInt(url.searchParams.get("grid") || "7", 10));
+  // Katto 6 (36 pistetta), ei 10 (100 pistetta) niin kuin /fragmentation
+  // sallii yksinaan. Syy: Cloudflare Workers -ilmaistason 50 ulkoisen
+  // subrequestin raja per suoritus. /combined tekee CORINE-ruudukon
+  // LISAKSI 2 NDVI-pyyntoa (token + tilastot) samassa suorituksessa -
+  // 49 (7x7) + 2 = 51 ylitti rajan yhdella (havaittu 2026-07-08).
+  // 36 (6x6) + 2 = 38, reilusti alle.
+  const n = Math.min(6, parseInt(url.searchParams.get("grid") || "6", 10));
   const months = Math.max(1, Math.min(12, parseInt(url.searchParams.get("months") || "3", 10)));
 
   const [corineResult, ndviResult] = await Promise.allSettled([
