@@ -113,27 +113,167 @@ async function handleFragmentation(url) {
 function handleStatus() {
   return json({
     proxy: "aci-corine-proxy",
-    version: "0.1",
+    version: "0.2",
     purpose: "D_f (fragmentation) data source for BEM — Biodiversity Endurance Monitor",
     pilot: "Rautalammin reitti",
     default_bbox: DEFAULT_BBOX,
     routes: {
       "/status": "Proxy status",
-      "/fragmentation": "Grid-sampled D_f proxy · ?bbox=...&grid=7 (n x n points, max 10x10)"
+      "/fragmentation": "Grid-sampled CORINE D_f proxy · ?bbox=...&grid=7 (n x n points, max 10x10)",
+      "/ndvi": "Sentinel Hub Statistical API — NDVI mean/stDev over bbox · ?bbox=...&months=3"
     },
     source: {
-      service: "SYKE inspire_lc WMS (GeoServer)",
-      dataset: "CorineLandCover2018 (LC.LandCoverSurfaces.2018)",
-      auth_required: false,
-      reference: "https://ckan.ymparisto.fi/dataset/syke-maanpeite-wcs"
+      corine: {
+        service: "SYKE inspire_lc WMS (GeoServer)",
+        dataset: "CorineLandCover2018 (LC.LandCoverSurfaces.2018)",
+        auth_required: false,
+        reference: "https://ckan.ymparisto.fi/dataset/syke-maanpeite-wcs"
+      },
+      ndvi: {
+        service: "Sentinel Hub Statistical API (Copernicus Data Space Ecosystem)",
+        dataset: "Sentinel-2 L2A",
+        auth_required: true,
+        reference: "https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Statistical/Examples.html"
+      }
     },
-    caveat: "Point-sample proxy, not true patch/edge-density fragmentation analysis",
+    caveat: "CORINE route: point-sample proxy, not true patch/edge-density fragmentation analysis. NDVI route: cloud-computed statistics, no raw pixel download.",
     reference_doc: "https://aethercontinuity.org/supplements/tn-015-biodiversity-endurance-monitor.html"
   });
 }
 
+// ── NDVI via Sentinel Hub Statistical API ────────────────────────────────
+// Käyttää samaa OAuth2 client_credentials -virtaa kuin aci-bem-proxy:n
+// aiempi (keskeneräiseksi jäänyt) Copernicus-yritys. Vaatii secretit:
+// COPERNICUS_CLIENT_ID, COPERNICUS_CLIENT_SECRET (aci-corine-proxy:lle
+// asetettava erikseen — eri Worker, eri secret-varasto kuin aci-bem-proxy).
+//
+// Statistical API laskee NDVI:n keskiarvon/hajonnan SUORAAN palvelimella
+// annetulle alueelle ja aikavälille — ei raakojen kuvatiedostojen latausta
+// eikä pikselikäsittelyä Workerissa. Vesipikselit (SCL==6) ja virheelliset
+// arvot suodatetaan pois evalscriptissä ennen tilastointia.
+
+const NDVI_EVALSCRIPT = `
+//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["B04", "B08", "SCL", "dataMask"] }],
+    output: [
+      { id: "data", bands: 1 },
+      { id: "dataMask", bands: 1 }
+    ]
+  };
+}
+function evaluatePixel(samples) {
+  let ndvi = (samples.B08 - samples.B04) / (samples.B08 + samples.B04);
+  let validNDVI = (samples.B08 + samples.B04 == 0) ? 0 : 1;
+  let noWater = (samples.SCL == 6) ? 0 : 1;
+  return {
+    data: [ndvi],
+    dataMask: [samples.dataMask * validNDVI * noWater]
+  };
+}
+`;
+
+async function getCopernicusToken(env) {
+  const tokenUrl = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token";
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: env.COPERNICUS_CLIENT_ID,
+    client_secret: env.COPERNICUS_CLIENT_SECRET
+  });
+  const r = await fetch(tokenUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString()
+  });
+  if (!r.ok) {
+    throw new Error(`Copernicus token fetch failed: ${r.status} ${await r.text()}`);
+  }
+  const data = await r.json();
+  return data.access_token;
+}
+
+async function handleNDVI(url, env) {
+  if (!env.COPERNICUS_CLIENT_ID || !env.COPERNICUS_CLIENT_SECRET) {
+    return json({
+      error: "COPERNICUS_CLIENT_ID / COPERNICUS_CLIENT_SECRET not configured",
+      hint: "wrangler secret put COPERNICUS_CLIENT_ID (ja _SECRET) tähän Workeriin"
+    }, 500);
+  }
+
+  const bboxStr = url.searchParams.get("bbox") || DEFAULT_BBOX;
+  const [minLon, minLat, maxLon, maxLat] = bboxStr.split(",").map(Number);
+  const months = Math.max(1, Math.min(12, parseInt(url.searchParams.get("months") || "3", 10)));
+
+  const now = new Date();
+  const to = now.toISOString();
+  const from = new Date(now.getTime() - months * 30 * 24 * 3600 * 1000).toISOString();
+
+  let token;
+  try {
+    token = await getCopernicusToken(env);
+  } catch (e) {
+    return json({ error: e.message, step: "oauth_token" }, 502);
+  }
+
+  const statsRequest = {
+    input: {
+      bounds: {
+        bbox: [minLon, minLat, maxLon, maxLat],
+        properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" }
+      },
+      data: [
+        {
+          type: "sentinel-2-l2a",
+          dataFilter: { maxCloudCoverage: 40, mosaickingOrder: "leastCC" }
+        }
+      ]
+    },
+    aggregation: {
+      timeRange: { from, to },
+      aggregationInterval: { of: `P${months * 30}D` },
+      evalscript: NDVI_EVALSCRIPT,
+      resx: 10,
+      resy: 10
+    }
+  };
+
+  try {
+    const r = await fetch("https://sh.dataspace.copernicus.eu/statistics/v1", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": `Bearer ${token}`
+      },
+      body: JSON.stringify(statsRequest)
+    });
+    if (!r.ok) {
+      return json({ error: `Statistical API: HTTP ${r.status}`, detail: await r.text() }, 502);
+    }
+    const data = await r.json();
+    const interval = data?.data?.[0];
+    const stats = interval?.outputs?.data?.bands?.B0?.stats;
+
+    return json({
+      bem_component: "D_f (NDVI proxy)",
+      method: "sentinel_hub_statistical_api",
+      bbox: bboxStr,
+      time_range: { from, to },
+      max_cloud_coverage_pct: 40,
+      ndvi_stats: stats || null,
+      raw_response: stats ? undefined : data, // näytä raaka vastaus jos oletettu polku ei löydy — debug
+      source: "Sentinel Hub Statistical API (Copernicus Data Space Ecosystem), Sentinel-2 L2A",
+      caveat: "Cloud-aggregated statistics over full bbox and time window, not a spatial grid — single mean/stDev value for the whole area."
+    });
+  } catch (e) {
+    return json({ error: e.message, step: "statistics_request" }, 502);
+  }
+}
+
+
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") {
@@ -150,6 +290,8 @@ export default {
         return handleStatus();
       } else if (path === "/fragmentation") {
         return await handleFragmentation(url);
+      } else if (path === "/ndvi") {
+        return await handleNDVI(url, env);
       } else {
         return json({ error: `Unknown route: ${path}` }, 404);
       }
