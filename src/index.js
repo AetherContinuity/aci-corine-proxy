@@ -233,8 +233,12 @@ async function handleNDVI(url, env) {
       timeRange: { from, to },
       aggregationInterval: { of: `P${months * 30}D` },
       evalscript: NDVI_EVALSCRIPT,
-      resx: 10,
-      resy: 10
+      // 500m: koko bbox (~75x120 km) on liian suuri 10m-tarkkuudelle
+      // yhdessa Statistical API -pyynnossa (HTTP 400, "meters per pixel
+      // exceeds limit"). 500m antaa ~150x240 pikselia, riittava koska
+      // haetaan yksi keskiarvo/hajonta-tilasto koko alueelle, ei ruudukkoa.
+      resx: 500,
+      resy: 500
     }
   };
 
