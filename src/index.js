@@ -233,11 +233,15 @@ async function handleNDVI(url, env) {
       timeRange: { from, to },
       aggregationInterval: { of: `P${months * 30}D` },
       evalscript: NDVI_EVALSCRIPT,
-      // DIAGNOSTIIKKA (2026-07-08): sama virhe (122348.89 m/px) toistui
-      // identtisenä myos resx/resy=500:lla - testataan nyt 5000:lla
-      // selvittaaksemme vaikuttaako tama parametri virheeseen ollenkaan.
-      resx: 5000,
-      resy: 5000
+      // JUURISYY LOYTYI (2026-07-08): resx/resy-yksikko maaraytyy CRS:n
+      // mukaan - EPSG:4326:lla (WGS84) yksikko on ASTETTA, ei metria.
+      // Annoin resx/resy:n metreina (10/500/5000), jotka kaikki ylittivat
+      // bbox:n oman leveyden (1.5 astetta) reilusti asteina tulkittuna ->
+      // yksi ainoa pikseli koko bbox:lle joka kerta, sama virhe identtisena.
+      // Korjaus: width/height (pikselimaara) sen sijaan - ei riipu CRS:n
+      // yksikosta ollenkaan.
+      width: 150,
+      height: 240
     }
   };
 
