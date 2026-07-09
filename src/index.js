@@ -66,13 +66,13 @@ async function fetchLandCoverAtPoint(lon, lat) {
   }
 }
 
-function gridPoints(bboxStr, n) {
+function gridPoints(bboxStr, n, offset = 0.5) {
   const [minLon, minLat, maxLon, maxLat] = bboxStr.split(",").map(Number);
   const pts = [];
   for (let ix = 0; ix < n; ix++) {
     for (let iy = 0; iy < n; iy++) {
-      const lon = minLon + (maxLon - minLon) * (ix + 0.5) / n;
-      const lat = minLat + (maxLat - minLat) * (iy + 0.5) / n;
+      const lon = minLon + (maxLon - minLon) * (ix + offset) / n;
+      const lat = minLat + (maxLat - minLat) * (iy + offset) / n;
       pts.push([lon, lat]);
     }
   }
@@ -101,8 +101,8 @@ async function fetchProtectionAtPoint(lon, lat) {
   }
 }
 
-async function computeR(bboxStr, n) {
-  const points = gridPoints(bboxStr, n);
+async function computeR(bboxStr, n, offset = 0.5) {
+  const points = gridPoints(bboxStr, n, offset);
   const results = await Promise.all(points.map(([lon, lat]) => fetchProtectionAtPoint(lon, lat)));
   const valid = results.filter(r => r !== null);
 
@@ -115,8 +115,10 @@ async function computeR(bboxStr, n) {
 
   return {
     grid_size: `${n}x${n}`,
+    offset: offset,
     points_queried: points.length,
     points_valid: valid.length,
+    protected_hits: protectedHits.length,
     protected_fraction: +protectedFraction.toFixed(3),
     layers_queried: PS_LAYERS.split(","),
     source: "SYKE inspire_ps WMS (Natura 2000 SAC/SPA + valtion/yksityiset luonnonsuojelualueet), no auth required"
@@ -126,10 +128,16 @@ async function computeR(bboxStr, n) {
 async function handleR(url) {
   const bbox = url.searchParams.get("bbox") || DEFAULT_BBOX;
   const n = Math.min(7, parseInt(url.searchParams.get("grid") || "7", 10)); // katto 7x7=49, sama subrequest-raja kuin /fragmentation
+  // offset [0,1): siirtaa naytepisteita solun sisalla. Kayttamalla eri
+  // offset-arvoja usealla erillisella kutsulla (esim. asiakaspuolelta
+  // 0.25/0.5/0.75) saadaan eri pisteet joka kerta ilman etta yksikaan
+  // yksittainen Worker-suoritus ylittaa Cloudflaren 50 subrequestin
+  // rajaa - kasvattaa todellista otoskokoa ilman SYKE:n WFS-tunnistetta.
+  const offset = Math.max(0, Math.min(0.99, parseFloat(url.searchParams.get("offset") || "0.5")));
 
   let result;
   try {
-    result = await computeR(bbox, n);
+    result = await computeR(bbox, n, offset);
   } catch (e) {
     return json({ error: e.message, bem_component: "R", status: "failed" }, 502);
   }
@@ -145,7 +153,7 @@ async function handleR(url) {
     R: +R.toFixed(3),
     method: "grid_sample_syke_wms_ps",
     ...result,
-    caveat: "Point-sample proxy suojellun pinta-alan osuudesta, ei huomioi suojelualueiden kytkeytyneisyyttä tai laatua."
+    caveat: "Point-sample proxy suojellun pinta-alan osuudesta, ei huomioi suojelualueiden kytkeytyneisyyttä tai laatua. Kutsu useilla eri offset-arvoilla ja yhdista tulokset vahentaaksesi otantavirhetta."
   });
 }
 
