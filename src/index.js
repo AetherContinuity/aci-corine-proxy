@@ -18,6 +18,20 @@ const DEFAULT_BBOX = "26.00,62.40,27.50,63.50"; // Rautalammin reitti pilottialu
 
 const SYKE_WMS = "https://paikkatiedot.ymparisto.fi/geoserver/inspire_lc/wms";
 const LAYER = "LC.LandCoverSurfaces.2018";
+
+// R (palautumiskyky) — SYKE inspire_ps WMS, suojelualueet.
+// Vain aidosti ekologiset suojelutyypit, ei rakennusperintoa. Kaksi
+// GetCapabilities:sta loydettya kerrosta (Eramaa-alue, Natura SCI)
+// JATETTIIN POIS koska niiden oma bbox ei ulotu Rautalammille (62.9N)
+// ollenkaan - havaittu 2026-07-08 GetCapabilities-tarkistuksessa,
+// ei arvattu.
+const SYKE_PS_WMS = "https://paikkatiedot.ymparisto.fi/geoserver/inspire_ps/wms";
+const PS_LAYERS = [
+  "PS.ProtectedSitesSpecialAreaOfConservation",       // Natura 2000 SAC
+  "PS.ProtectedSitesSpecialProtectionArea",           // Natura 2000 SPA
+  "PS.ProtectedSitesValtionOmistamaLuonnonsuojelualue", // valtion luonnonsuojelualueet
+  "PS.ProtectedSitesYksityistenMaillaOlevaLuonnonsuojelualue" // yksityiset luonnonsuojelualueet
+].join(",");
 const FOREST_CLASSES = new Set([311, 312, 313]); // CLC level3: metsätyypit
 const WATER_CLASSES = new Set([511, 512]); // CLC level3: joet/kanavat, järvet — vastaa NDVI:n SCL==6-vesimaskia
 const REF_FOREST_AREA_M2 = 10_000_000; // 10 km² viite "ehjälle" metsälaikulle — dokumentoitu arvio, ei standardi
@@ -63,6 +77,76 @@ function gridPoints(bboxStr, n) {
     }
   }
   return pts;
+}
+
+// ── R (palautumiskyky) — SYKE inspire_ps WMS, ruudukkopisteotanta ──────
+// Sama menetelma kuin CORINE:lla. Yksi GetFeatureInfo-pyynto per piste,
+// nelja suojelualuekerrosta pilkuilla eroteltuna samassa pyynnossa (ei
+// nelinkertaista subrequest-maaraa - GeoServer palauttaa yhdistetyn
+// FeatureCollectionin kaikista kerroksista yhdessa vastauksessa).
+async function fetchProtectionAtPoint(lon, lat) {
+  const d = 0.01;
+  const bbox = `${lon - d},${lat - d},${lon + d},${lat + d}`;
+  const url = `${SYKE_PS_WMS}?service=WMS&version=1.3.0&request=GetFeatureInfo` +
+    `&layers=${PS_LAYERS}&query_layers=${PS_LAYERS}` +
+    `&crs=CRS:84&bbox=${bbox}&width=101&height=101&i=50&j=50` +
+    `&info_format=application/json&feature_count=10`;
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const j = await r.json();
+    return { protected: (j.features && j.features.length > 0) };
+  } catch (e) {
+    return null;
+  }
+}
+
+async function computeR(bboxStr, n) {
+  const points = gridPoints(bboxStr, n);
+  const results = await Promise.all(points.map(([lon, lat]) => fetchProtectionAtPoint(lon, lat)));
+  const valid = results.filter(r => r !== null);
+
+  if (valid.length === 0) {
+    throw new Error("Ei yhtään validia pistettä palautunut SYKE inspire_ps:ltä");
+  }
+
+  const protectedHits = valid.filter(r => r.protected);
+  const protectedFraction = protectedHits.length / valid.length;
+
+  return {
+    grid_size: `${n}x${n}`,
+    points_queried: points.length,
+    points_valid: valid.length,
+    protected_fraction: +protectedFraction.toFixed(3),
+    layers_queried: PS_LAYERS.split(","),
+    source: "SYKE inspire_ps WMS (Natura 2000 SAC/SPA + valtion/yksityiset luonnonsuojelualueet), no auth required"
+  };
+}
+
+async function handleR(url) {
+  const bbox = url.searchParams.get("bbox") || DEFAULT_BBOX;
+  const n = Math.min(7, parseInt(url.searchParams.get("grid") || "7", 10)); // katto 7x7=49, sama subrequest-raja kuin /fragmentation
+
+  let result;
+  try {
+    result = await computeR(bbox, n);
+  } catch (e) {
+    return json({ error: e.message, bem_component: "R", status: "failed" }, 502);
+  }
+
+  // R: suoraan suojeltu pinta-alaosuus. Dokumentoitu approksimaatio -
+  // ei huomioi suojelualueiden sijaintia suhteessa muuhun maisemaan
+  // (esim. onko suojeltu alue kytkoksissa muihin vai eristyksissa),
+  // vain karkea pinta-alaosuus.
+  const R = Math.max(0, Math.min(1, result.protected_fraction));
+
+  return json({
+    bem_component: "R (recovery capacity proxy)",
+    R: +R.toFixed(3),
+    method: "grid_sample_syke_wms_ps",
+    ...result,
+    caveat: "Point-sample proxy suojellun pinta-alan osuudesta, ei huomioi suojelualueiden kytkeytyneisyyttä tai laatua."
+  });
 }
 
 async function computeFragmentation(bboxStr, n) {
@@ -138,15 +222,16 @@ async function handleFragmentation(url) {
 function handleStatus() {
   return json({
     proxy: "aci-corine-proxy",
-    version: "0.3",
-    purpose: "D_f (fragmentation) data source for BEM — Biodiversity Endurance Monitor",
+    version: "0.4",
+    purpose: "D_f and R data sources for BEM — Biodiversity Endurance Monitor",
     pilot: "Rautalammin reitti",
     default_bbox: DEFAULT_BBOX,
     routes: {
       "/status": "Proxy status",
-      "/fragmentation": "Grid-sampled CORINE D_f proxy · ?bbox=...&grid=7 (n x n points, max 10x10)",
+      "/fragmentation": "Grid-sampled CORINE D_f proxy · ?bbox=...&grid=7 (n x n points, max 7x7)",
       "/ndvi": "Sentinel Hub Statistical API — NDVI mean/stDev over bbox · ?bbox=...&months=3",
-      "/combined": "CORINE + NDVI rinnakkain, ristiintarkistus, yhdistetty D_f · ?bbox=...&grid=7&months=3"
+      "/combined": "CORINE + NDVI rinnakkain, ristiintarkistus, yhdistetty D_f · ?bbox=...&grid=6&months=3",
+      "/recovery": "Grid-sampled SYKE protected-area R proxy · ?bbox=...&grid=7 (n x n points, max 7x7)"
     },
     source: {
       corine: {
@@ -160,9 +245,16 @@ function handleStatus() {
         dataset: "Sentinel-2 L2A",
         auth_required: true,
         reference: "https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Statistical/Examples.html"
+      },
+      protected_areas: {
+        service: "SYKE inspire_ps WMS (GeoServer)",
+        dataset: "Natura 2000 SAC/SPA + valtion/yksityiset luonnonsuojelualueet",
+        auth_required: false,
+        reference: "https://ckan.ymparisto.fi/dataset/syke-suojellutalueet-wms",
+        note: "Kaksi muuta suojelutyyppia (Eramaa-alue, Natura SCI) jatetty pois - niiden oma bbox ei ulotu Rautalammille."
       }
     },
-    caveat: "CORINE route: point-sample proxy, not true patch/edge-density fragmentation analysis. NDVI route: cloud-computed statistics, no raw pixel download.",
+    caveat: "CORINE/protected-area routes: point-sample proxies, not exhaustive spatial analysis. NDVI route: cloud-computed statistics, no raw pixel download.",
     reference_doc: "https://aethercontinuity.org/supplements/tn-015-biodiversity-endurance-monitor.html"
   });
 }
@@ -395,6 +487,8 @@ export default {
         return await handleNDVI(url, env);
       } else if (path === "/combined") {
         return await handleCombined(url, env);
+      } else if (path === "/recovery") {
+        return await handleR(url);
       } else {
         return json({ error: `Unknown route: ${path}` }, 404);
       }
