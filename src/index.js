@@ -238,6 +238,7 @@ function handleStatus() {
       "/status": "Proxy status",
       "/fragmentation": "Grid-sampled CORINE D_f proxy · ?bbox=...&grid=7 (n x n points, max 7x7)",
       "/ndvi": "Sentinel Hub Statistical API — NDVI mean/stDev over bbox · ?bbox=...&months=3",
+      "/ndvi-image": "Sentinel Hub Process API — renderoitu NDVI-kuva (vihrea-keltainen-punainen) · ?bbox=...&months=3&w=480&h=350",
       "/combined": "CORINE + NDVI rinnakkain, ristiintarkistus, yhdistetty D_f · ?bbox=...&grid=6&months=3",
       "/recovery": "Grid-sampled SYKE protected-area R proxy · ?bbox=...&grid=7 (n x n points, max 7x7)"
     },
@@ -405,6 +406,125 @@ async function handleNDVI(url, env) {
   }
 }
 
+// ── NDVI-kuva via Sentinel Hub Process API ───────────────────────────────
+// SAMA OAuth-tunnistautuminen (getCopernicusToken) kuin Statistical API:lla,
+// mutta Process API palauttaa RENDEROIDUN kuvan (PNG), ei tilastoja.
+// Vari-evalscript maarittelee vihrea->keltainen->punainen-liukuvarin
+// suoraan NDVI-arvosta - sama visuaalinen konventio kuin useimmissa
+// julkisissa satelliittikuva-NDVI-esityksissa (esim. NASA Earth Observatory).
+//
+// HUOM: tama on ERI kutsu (eri hinnoittelu/kiintio Copernicus-tilillä)
+// kuin /ndvi:n oma Statistical API -kutsu - kuvan pyytäminen usein
+// (esim. joka sivunlatauksella) kuluttaa Process Unit -kiintiota nopeammin
+// kuin pelkka tilastokutsu. Ei omaa valimuistia (cache) tassa versiossa -
+// jos kaytto kasvaa, harkitse KV-pohjaista valimuistia (esim. 6h TTL).
+const NDVI_IMAGE_EVALSCRIPT = `
+//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["B04", "B08", "SCL", "dataMask"] }],
+    output: { bands: 4, sampleType: "UINT8" }
+  };
+}
+
+// Vihrea->keltainen->punainen, korkea NDVI (terve kasvillisuus) = vihrea,
+// matala/negatiivinen NDVI (paljas maa, kuivunut) = punainen. Sama
+// suunta kuin useimmissa julkisissa NDVI-kartoissa.
+function ndviColor(ndvi) {
+  if (ndvi < 0.0)  return [140, 90, 60];    // paljas maa / kuivunut - ruskea
+  if (ndvi < 0.2)  return [204, 60, 45];    // punainen - hyvin vahaista kasvillisuutta
+  if (ndvi < 0.35) return [224, 150, 55];   // oranssi
+  if (ndvi < 0.5)  return [220, 200, 70];   // keltainen
+  if (ndvi < 0.65) return [150, 190, 70];   // vaaleanvihrea
+  if (ndvi < 0.8)  return [70, 150, 60];    // vihrea
+  return [30, 100, 40];                     // tummanvihrea - tiheä metsa
+}
+
+function evaluatePixel(s) {
+  var isWater = (s.SCL == 6);
+  if (s.dataMask == 0 || isWater) {
+    return [190, 205, 215, 90]; // vaalea sinertava, lapinakyva - vesi/data puuttuu
+  }
+  var ndvi = (s.B08 - s.B04) / (s.B08 + s.B04);
+  var c = ndviColor(ndvi);
+  return [c[0], c[1], c[2], 255];
+}
+`;
+
+async function fetchNDVIImage(bboxStr, months, width, height, env) {
+  if (!env.COPERNICUS_CLIENT_ID || !env.COPERNICUS_CLIENT_SECRET) {
+    throw new Error("COPERNICUS_CLIENT_ID / COPERNICUS_CLIENT_SECRET not configured (wrangler secret put ...)");
+  }
+  const [minLon, minLat, maxLon, maxLat] = bboxStr.split(",").map(Number);
+
+  const now = new Date();
+  const to = now.toISOString();
+  const from = new Date(now.getTime() - months * 30 * 24 * 3600 * 1000).toISOString();
+
+  const token = await getCopernicusToken(env);
+
+  const processRequest = {
+    input: {
+      bounds: {
+        bbox: [minLon, minLat, maxLon, maxLat],
+        properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" }
+      },
+      data: [{
+        type: "sentinel-2-l2a",
+        dataFilter: {
+          maxCloudCoverage: 40,
+          mosaickingOrder: "leastCC",
+          timeRange: { from, to }
+        }
+      }]
+    },
+    output: {
+      width,
+      height,
+      responses: [{ identifier: "default", format: { type: "image/png" } }]
+    },
+    evalscript: NDVI_IMAGE_EVALSCRIPT
+  };
+
+  const r = await fetch("https://sh.dataspace.copernicus.eu/api/v1/process", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "image/png",
+      "Authorization": `Bearer ${token}`
+    },
+    body: JSON.stringify(processRequest)
+  });
+  if (!r.ok) {
+    throw new Error(`Process API: HTTP ${r.status} ${await r.text()}`);
+  }
+  return await r.arrayBuffer();
+}
+
+async function handleNDVIImage(url, env) {
+  const bboxStr = url.searchParams.get("bbox") || DEFAULT_BBOX;
+  const months = Math.max(1, Math.min(12, parseInt(url.searchParams.get("months") || "3", 10)));
+  // Leveys/korkeus suhteessa bbox:in omaan kuvasuhteeseen (~1.36:1
+  // oletus-Rautalammin-bbox:lle), katto 640px per Process API:n
+  // omaa jarkevaa kayttoa varten - ei tarvita suurempaa nain pientä
+  // esikatselukuvaa varten.
+  const width  = Math.max(64, Math.min(640, parseInt(url.searchParams.get("w") || "480", 10)));
+  const height = Math.max(64, Math.min(640, parseInt(url.searchParams.get("h") || "350", 10)));
+
+  try {
+    const png = await fetchNDVIImage(bboxStr, months, width, height, env);
+    return new Response(png, {
+      headers: {
+        "Content-Type": "image/png",
+        "Cache-Control": "public, max-age=21600", // 6h - Process Unit -kiintion sailytys
+        ...CORS
+      }
+    });
+  } catch (e) {
+    return json({ error: e.message, step: "ndvi-image" }, 502);
+  }
+}
+
 // ── Yhdistetty reitti: CORINE + NDVI rinnakkain, ristiintarkistus + D_f ──
 async function handleCombined(url, env) {
   const bboxStr = url.searchParams.get("bbox") || DEFAULT_BBOX;
@@ -493,6 +613,8 @@ export default {
         return await handleFragmentation(url);
       } else if (path === "/ndvi") {
         return await handleNDVI(url, env);
+      } else if (path === "/ndvi-image") {
+        return await handleNDVIImage(url, env);
       } else if (path === "/combined") {
         return await handleCombined(url, env);
       } else if (path === "/recovery") {
