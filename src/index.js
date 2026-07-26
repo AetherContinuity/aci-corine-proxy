@@ -241,6 +241,8 @@ function handleStatus() {
       "/ndvi-image": "Sentinel Hub Process API — renderoitu NDVI-kuva (vihrea-keltainen-punainen) · ?bbox=...&months=3&w=480&h=350",
       "/mndwi": "BEM-E (Aquatic Extension) — MNDWI-tilasto [A-luokka] · ?bbox=...&months=3 · EI VIELA live-testattu",
       "/mndwi-image": "BEM-E — renderoitu MNDWI-kuva (ruskea-vihrea-sininen) · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
+      "/ndci": "BEM-E — NDCI-tilasto [B-luokka, KOKEELLINEN] · ?bbox=...&months=3 · vain vesipikselit (SCL==6) · EI VIELA live-testattu",
+      "/ndci-image": "BEM-E — renderoitu NDCI-kuva (sininen-vihrea-keltainen-punainen) [B-luokka] · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
       "/combined": "CORINE + NDVI rinnakkain, ristiintarkistus, yhdistetty D_f · ?bbox=...&grid=6&months=3",
       "/recovery": "Grid-sampled SYKE protected-area R proxy · ?bbox=...&grid=7 (n x n points, max 7x7)"
     },
@@ -496,6 +498,205 @@ async function handleMNDWIImage(url, env) {
     });
   } catch (e) {
     return json({ error: e.message, step: "mndwi-image" }, 502);
+  }
+}
+
+// ── BEM-E (Aquatic Extension) — NDCI [B-luokka, KOKEELLINEN] ──
+// NDCI = (B05-B04)/(B05+B04), Mishra & Mishra 2012. Varmistettu 2026-07-26
+// Sentinel Hubin omasta custom-scripts-arkistosta. HUOM: virallinen
+// Digital Earth Africa -dokumentaatio MERKITSEE TAMAN "kokeelliseksi
+// Sentinel-2:lle" - EI yhta vakiintunut kuin MNDWI. Ks. aethercontinuity.org/
+// tools/hem-satellite-water-quality-plan.md.
+//
+// TOISIN KUIN MNDWI: NDCI:n tarkoitus ON mitata klorofyllia VEDEN
+// SISALLA, ei erottaa vetta maasta - siksi tama MASKAA POIS ei-vesi-
+// pikselit (SCL==6 = KEEP, kaanteinen logiikka NDVI_EVALSCRIPT:iin
+// verrattuna, joka maskasi veden POIS).
+const NDCI_EVALSCRIPT = `
+//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["B04", "B05", "SCL", "dataMask"] }],
+    output: [
+      { id: "data", bands: 1 },
+      { id: "dataMask", bands: 1 }
+    ]
+  };
+}
+function evaluatePixel(samples) {
+  let ndci = (samples.B05 - samples.B04) / (samples.B05 + samples.B04);
+  let valid = (samples.B05 + samples.B04 == 0) ? 0 : 1;
+  let isWater = (samples.SCL == 6) ? 1 : 0;
+  return {
+    data: [ndci],
+    dataMask: [samples.dataMask * valid * isWater]
+  };
+}
+`;
+
+async function computeNDCI(bboxStr, months, env) {
+  if (!env.COPERNICUS_CLIENT_ID || !env.COPERNICUS_CLIENT_SECRET) {
+    throw new Error("COPERNICUS_CLIENT_ID / COPERNICUS_CLIENT_SECRET not configured (wrangler secret put ...)");
+  }
+  const [minLon, minLat, maxLon, maxLat] = bboxStr.split(",").map(Number);
+  const now = new Date();
+  const to = now.toISOString();
+  const from = new Date(now.getTime() - months * 30 * 24 * 3600 * 1000).toISOString();
+  const token = await getCopernicusToken(env);
+
+  const statsRequest = {
+    input: {
+      bounds: {
+        bbox: [minLon, minLat, maxLon, maxLat],
+        properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" }
+      },
+      data: [
+        { type: "sentinel-2-l2a", dataFilter: { maxCloudCoverage: 40, mosaickingOrder: "leastCC" } }
+      ]
+    },
+    aggregation: {
+      timeRange: { from, to },
+      aggregationInterval: { of: `P${months * 30}D` },
+      evalscript: NDCI_EVALSCRIPT,
+      width: 150,
+      height: 240
+    }
+  };
+
+  const r = await fetch("https://sh.dataspace.copernicus.eu/statistics/v1", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+      "Authorization": `Bearer ${token}`
+    },
+    body: JSON.stringify(statsRequest)
+  });
+  if (!r.ok) {
+    throw new Error(`Statistical API: HTTP ${r.status} ${await r.text()}`);
+  }
+  const data = await r.json();
+  const interval = data?.data?.[0];
+  const stats = interval?.outputs?.data?.bands?.B0?.stats;
+
+  if (!stats) {
+    return { error: "unexpected_response_shape", raw_response: data, time_range: { from, to } };
+  }
+
+  return {
+    time_range: { from, to },
+    max_cloud_coverage_pct: 40,
+    ndci_stats: stats,
+    grade: "B - KOKEELLINEN (Mishra & Mishra 2012, merkitty kokeelliseksi Sentinel-2:lle virallisen dokumentaation mukaan)",
+    masking: "Vain vesipikselit (SCL==6) - maapikselit maskattu pois",
+    source: "Sentinel Hub Statistical API (Copernicus Data Space Ecosystem), Sentinel-2 L2A"
+  };
+}
+
+async function handleNDCI(url, env) {
+  const bboxStr = url.searchParams.get("bbox");
+  const months = Math.max(1, Math.min(12, parseInt(url.searchParams.get("months") || "3", 10)));
+  if (!bboxStr) {
+    return json({ error: "bbox-parametri on pakollinen (esim. Iisvesi: 26.167,62.567,27.067,63.467)" }, 400);
+  }
+
+  try {
+    const result = await computeNDCI(bboxStr, months, env);
+    return json({
+      bem_e_component: "NDCI (Aquatic Extension, B-luokka - KOKEELLINEN)",
+      method: "sentinel_hub_statistical_api",
+      bbox: bboxStr,
+      ...result,
+      caveat: "EI VIELA live-testattu tallle nimenomaiselle bbox:ille (kirjoitettu 2026-07-26). Cloud-aggregoitu tilasto VAIN vesipikseleilta (SCL==6). Jos vesipikseleita on vahan (esim. paljon pilvia tai pieni bbox), sampleCount voi olla pieni ja tulos epaluotettava - tarkista aina sampleCount."
+    });
+  } catch (e) {
+    return json({ error: e.message, step: "ndci" }, 502);
+  }
+}
+
+// NDCI-kuva: vihrea (matala/negatiivinen = vahan klorofyllia) -> keltainen -> punainen (korkea = mahdollinen levakukinta)
+const NDCI_IMAGE_EVALSCRIPT = `
+//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["B04", "B05", "SCL", "dataMask"] }],
+    output: { bands: 4, sampleType: "UINT8" }
+  };
+}
+function ndciColor(n) {
+  if (n < -0.1) return [40, 90, 140];    // tummansininen - hyvin vahan klorofyllia (kirkas vesi)
+  if (n < 0.0)  return [60, 130, 110];   // sinivihrea - vahan klorofyllia
+  if (n < 0.1)  return [120, 170, 70];   // vihrea - kohtalainen
+  if (n < 0.2)  return [210, 200, 60];   // keltainen - koholla
+  if (n < 0.3)  return [230, 140, 40];   // oranssi - korkea
+  return [200, 40, 30];                  // punainen - hyvin korkea, mahdollinen levakukinta
+}
+function evaluatePixel(s) {
+  var isWater = (s.SCL == 6);
+  if (s.dataMask == 0 || !isWater) {
+    return [230, 225, 210, 70]; // vaalea, lapinakyva - ei vetta tassa pikselissa
+  }
+  var ndci = (s.B05 - s.B04) / (s.B05 + s.B04);
+  var c = ndciColor(ndci);
+  return [c[0], c[1], c[2], 255];
+}
+`;
+
+async function fetchNDCIImage(bboxStr, months, width, height, env) {
+  if (!env.COPERNICUS_CLIENT_ID || !env.COPERNICUS_CLIENT_SECRET) {
+    throw new Error("COPERNICUS_CLIENT_ID / COPERNICUS_CLIENT_SECRET not configured (wrangler secret put ...)");
+  }
+  const [minLon, minLat, maxLon, maxLat] = bboxStr.split(",").map(Number);
+  const now = new Date();
+  const to = now.toISOString();
+  const from = new Date(now.getTime() - months * 30 * 24 * 3600 * 1000).toISOString();
+  const token = await getCopernicusToken(env);
+
+  const processRequest = {
+    input: {
+      bounds: {
+        bbox: [minLon, minLat, maxLon, maxLat],
+        properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" }
+      },
+      data: [{
+        type: "sentinel-2-l2a",
+        dataFilter: { maxCloudCoverage: 40, mosaickingOrder: "leastCC", timeRange: { from, to } }
+      }]
+    },
+    output: {
+      width, height,
+      responses: [{ identifier: "default", format: { type: "image/png" } }]
+    },
+    evalscript: NDCI_IMAGE_EVALSCRIPT
+  };
+
+  const r = await fetch("https://sh.dataspace.copernicus.eu/api/v1/process", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Accept": "image/png", "Authorization": `Bearer ${token}` },
+    body: JSON.stringify(processRequest)
+  });
+  if (!r.ok) {
+    throw new Error(`Process API: HTTP ${r.status} ${await r.text()}`);
+  }
+  return await r.arrayBuffer();
+}
+
+async function handleNDCIImage(url, env) {
+  const bboxStr = url.searchParams.get("bbox");
+  const months = Math.max(1, Math.min(12, parseInt(url.searchParams.get("months") || "3", 10)));
+  const width  = Math.max(64, Math.min(640, parseInt(url.searchParams.get("w") || "480", 10)));
+  const height = Math.max(64, Math.min(640, parseInt(url.searchParams.get("h") || "480", 10)));
+  if (!bboxStr) {
+    return json({ error: "bbox-parametri on pakollinen (esim. Iisvesi: 26.167,62.567,27.067,63.467)" }, 400);
+  }
+
+  try {
+    const png = await fetchNDCIImage(bboxStr, months, width, height, env);
+    return new Response(png, {
+      headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=21600", ...CORS }
+    });
+  } catch (e) {
+    return json({ error: e.message, step: "ndci-image" }, 502);
   }
 }
 
@@ -817,6 +1018,10 @@ export default {
         return await handleMNDWI(url, env);
       } else if (path === "/mndwi-image") {
         return await handleMNDWIImage(url, env);
+      } else if (path === "/ndci") {
+        return await handleNDCI(url, env);
+      } else if (path === "/ndci-image") {
+        return await handleNDCIImage(url, env);
       } else if (path === "/combined") {
         return await handleCombined(url, env);
       } else if (path === "/recovery") {
