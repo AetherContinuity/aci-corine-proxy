@@ -239,6 +239,8 @@ function handleStatus() {
       "/fragmentation": "Grid-sampled CORINE D_f proxy · ?bbox=...&grid=7 (n x n points, max 7x7)",
       "/ndvi": "Sentinel Hub Statistical API — NDVI mean/stDev over bbox · ?bbox=...&months=3",
       "/ndvi-image": "Sentinel Hub Process API — renderoitu NDVI-kuva (vihrea-keltainen-punainen) · ?bbox=...&months=3&w=480&h=350",
+      "/mndwi": "BEM-E (Aquatic Extension) — MNDWI-tilasto [A-luokka] · ?bbox=...&months=3 · EI VIELA live-testattu",
+      "/mndwi-image": "BEM-E — renderoitu MNDWI-kuva (ruskea-vihrea-sininen) · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
       "/combined": "CORINE + NDVI rinnakkain, ristiintarkistus, yhdistetty D_f · ?bbox=...&grid=6&months=3",
       "/recovery": "Grid-sampled SYKE protected-area R proxy · ?bbox=...&grid=7 (n x n points, max 7x7)"
     },
@@ -300,6 +302,202 @@ function evaluatePixel(samples) {
   };
 }
 `;
+
+// ── BEM-E (Aquatic Extension) — MNDWI [A-luokka, vakiintunut] ──
+// MNDWI = (B03-B11)/(B03+B11), Xu 2006. Varmistettu 2026-07-26 Sentinel
+// Hubin omasta custom-scripts-arkistosta + useasta riippumattomasta
+// akateemisesta lahteesta (parempi vakaus kuin perinteinen NDWI SWIR-
+// kaistan ansiosta). Ks. aethercontinuity.org/tools/hem-satellite-
+// water-quality-plan.md.
+//
+// HUOM TOISIN KUIN NDVI_EVALSCRIPT: MNDWI:n oma tarkoitus ON EROTTAA
+// vesi maasta - EI siis maskata vetta pois (SCL==6-suodatinta EI
+// kayteta tassa), koko bbox:in yli laskettu keskiarvo/hajonta kuvaa
+// "kuinka paljon vetta suhteessa maahan" -tason muutosta ajassa.
+const MNDWI_EVALSCRIPT = `
+//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["B03", "B11", "dataMask"] }],
+    output: [
+      { id: "data", bands: 1 },
+      { id: "dataMask", bands: 1 }
+    ]
+  };
+}
+function evaluatePixel(samples) {
+  let mndwi = (samples.B03 - samples.B11) / (samples.B03 + samples.B11);
+  let valid = (samples.B03 + samples.B11 == 0) ? 0 : 1;
+  return {
+    data: [mndwi],
+    dataMask: [samples.dataMask * valid]
+  };
+}
+`;
+
+async function computeMNDWI(bboxStr, months, env) {
+  if (!env.COPERNICUS_CLIENT_ID || !env.COPERNICUS_CLIENT_SECRET) {
+    throw new Error("COPERNICUS_CLIENT_ID / COPERNICUS_CLIENT_SECRET not configured (wrangler secret put ...)");
+  }
+  const [minLon, minLat, maxLon, maxLat] = bboxStr.split(",").map(Number);
+  const now = new Date();
+  const to = now.toISOString();
+  const from = new Date(now.getTime() - months * 30 * 24 * 3600 * 1000).toISOString();
+  const token = await getCopernicusToken(env);
+
+  const statsRequest = {
+    input: {
+      bounds: {
+        bbox: [minLon, minLat, maxLon, maxLat],
+        properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" }
+      },
+      data: [
+        { type: "sentinel-2-l2a", dataFilter: { maxCloudCoverage: 40, mosaickingOrder: "leastCC" } }
+      ]
+    },
+    aggregation: {
+      timeRange: { from, to },
+      aggregationInterval: { of: `P${months * 30}D` },
+      evalscript: MNDWI_EVALSCRIPT,
+      // width/height, EI resx/resy - sama astevs-metri-yksikkobugi (2026-07-08)
+      // jonka NDVI-koodi jo valtti, sama varovaisuus tassa.
+      width: 150,
+      height: 240
+    }
+  };
+
+  const r = await fetch("https://sh.dataspace.copernicus.eu/statistics/v1", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+      "Authorization": `Bearer ${token}`
+    },
+    body: JSON.stringify(statsRequest)
+  });
+  if (!r.ok) {
+    throw new Error(`Statistical API: HTTP ${r.status} ${await r.text()}`);
+  }
+  const data = await r.json();
+  const interval = data?.data?.[0];
+  const stats = interval?.outputs?.data?.bands?.B0?.stats;
+
+  if (!stats) {
+    return { error: "unexpected_response_shape", raw_response: data, time_range: { from, to } };
+  }
+
+  return {
+    time_range: { from, to },
+    max_cloud_coverage_pct: 40,
+    mndwi_stats: stats,
+    grade: "A - vakiintunut (Xu 2006)",
+    source: "Sentinel Hub Statistical API (Copernicus Data Space Ecosystem), Sentinel-2 L2A"
+  };
+}
+
+async function handleMNDWI(url, env) {
+  const bboxStr = url.searchParams.get("bbox");
+  const months = Math.max(1, Math.min(12, parseInt(url.searchParams.get("months") || "3", 10)));
+  if (!bboxStr) {
+    return json({ error: "bbox-parametri on pakollinen (esim. Iisvesi: 26.667,62.567,27.067,62.967)" }, 400);
+  }
+
+  try {
+    const result = await computeMNDWI(bboxStr, months, env);
+    return json({
+      bem_e_component: "MNDWI (Aquatic Extension, A-luokka)",
+      method: "sentinel_hub_statistical_api",
+      bbox: bboxStr,
+      ...result,
+      caveat: "EI VIELA live-testattu tallle nimenomaiselle bbox:ille (kirjoitettu 2026-07-26). Cloud-aggregoitu tilasto koko bbox:in ja aikaikkunan yli, ei spatiaalinen ruudukko."
+    });
+  } catch (e) {
+    return json({ error: e.message, step: "mndwi" }, 502);
+  }
+}
+
+// MNDWI-kuva: sininen (korkea MNDWI = vesi) -> ruskea/vihrea (matala/negatiivinen = maa)
+const MNDWI_IMAGE_EVALSCRIPT = `
+//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["B03", "B11", "dataMask"] }],
+    output: { bands: 4, sampleType: "UINT8" }
+  };
+}
+function mndwiColor(m) {
+  if (m < -0.3) return [140, 110, 70];   // ruskea - kuiva maa
+  if (m < 0.0)  return [120, 150, 80];   // vihrea - kasvillisuus/maa
+  if (m < 0.2)  return [180, 210, 160];  // vaalea vihrea - kostea maa/rantavyohyke
+  if (m < 0.4)  return [140, 190, 220];  // vaalea sininen - matala/sameavesi
+  if (m < 0.6)  return [60, 140, 200];   // sininen - vesi
+  return [20, 80, 160];                  // tummansininen - syva/kirkas vesi
+}
+function evaluatePixel(s) {
+  if (s.dataMask == 0) return [255, 255, 255, 60];
+  var mndwi = (s.B03 - s.B11) / (s.B03 + s.B11);
+  var c = mndwiColor(mndwi);
+  return [c[0], c[1], c[2], 255];
+}
+`;
+
+async function fetchMNDWIImage(bboxStr, months, width, height, env) {
+  if (!env.COPERNICUS_CLIENT_ID || !env.COPERNICUS_CLIENT_SECRET) {
+    throw new Error("COPERNICUS_CLIENT_ID / COPERNICUS_CLIENT_SECRET not configured (wrangler secret put ...)");
+  }
+  const [minLon, minLat, maxLon, maxLat] = bboxStr.split(",").map(Number);
+  const now = new Date();
+  const to = now.toISOString();
+  const from = new Date(now.getTime() - months * 30 * 24 * 3600 * 1000).toISOString();
+  const token = await getCopernicusToken(env);
+
+  const processRequest = {
+    input: {
+      bounds: {
+        bbox: [minLon, minLat, maxLon, maxLat],
+        properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" }
+      },
+      data: [{
+        type: "sentinel-2-l2a",
+        dataFilter: { maxCloudCoverage: 40, mosaickingOrder: "leastCC", timeRange: { from, to } }
+      }]
+    },
+    output: {
+      width, height,
+      responses: [{ identifier: "default", format: { type: "image/png" } }]
+    },
+    evalscript: MNDWI_IMAGE_EVALSCRIPT
+  };
+
+  const r = await fetch("https://sh.dataspace.copernicus.eu/api/v1/process", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Accept": "image/png", "Authorization": `Bearer ${token}` },
+    body: JSON.stringify(processRequest)
+  });
+  if (!r.ok) {
+    throw new Error(`Process API: HTTP ${r.status} ${await r.text()}`);
+  }
+  return await r.arrayBuffer();
+}
+
+async function handleMNDWIImage(url, env) {
+  const bboxStr = url.searchParams.get("bbox");
+  const months = Math.max(1, Math.min(12, parseInt(url.searchParams.get("months") || "3", 10)));
+  const width  = Math.max(64, Math.min(640, parseInt(url.searchParams.get("w") || "480", 10)));
+  const height = Math.max(64, Math.min(640, parseInt(url.searchParams.get("h") || "480", 10)));
+  if (!bboxStr) {
+    return json({ error: "bbox-parametri on pakollinen (esim. Iisvesi: 26.667,62.567,27.067,62.967)" }, 400);
+  }
+
+  try {
+    const png = await fetchMNDWIImage(bboxStr, months, width, height, env);
+    return new Response(png, {
+      headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=21600", ...CORS }
+    });
+  } catch (e) {
+    return json({ error: e.message, step: "mndwi-image" }, 502);
+  }
+}
 
 async function getCopernicusToken(env) {
   const tokenUrl = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token";
@@ -615,6 +813,10 @@ export default {
         return await handleNDVI(url, env);
       } else if (path === "/ndvi-image") {
         return await handleNDVIImage(url, env);
+      } else if (path === "/mndwi") {
+        return await handleMNDWI(url, env);
+      } else if (path === "/mndwi-image") {
+        return await handleMNDWIImage(url, env);
       } else if (path === "/combined") {
         return await handleCombined(url, env);
       } else if (path === "/recovery") {
