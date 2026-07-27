@@ -230,7 +230,7 @@ async function handleFragmentation(url) {
 function handleStatus() {
   return json({
     proxy: "aci-corine-proxy",
-    version: "0.4",
+    version: "0.5-synctest",
     purpose: "D_f and R data sources for BEM — Biodiversity Endurance Monitor",
     pilot: "Rautalammin reitti",
     default_bbox: DEFAULT_BBOX,
