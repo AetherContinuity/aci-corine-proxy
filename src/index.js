@@ -243,7 +243,7 @@ function handleStatus() {
       "/mndwi-image": "BEM-E — renderoitu MNDWI-kuva (ruskea-vihrea-sininen) · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
       "/ndci": "BEM-E — NDCI-tilasto [B-luokka, KOKEELLINEN] · ?bbox=...&months=3 · vain vesipikselit (SCL==6) · EI VIELA live-testattu",
       "/ndci-image": "BEM-E — renderoitu NDCI-kuva (sininen-vihrea-keltainen-punainen) [B-luokka] · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
-      "/lake-timeseries": "BEM-E — takautuva kesakauden (touko-syyskuu) MNDWI+NDCI-aikasarja · ?bbox=...&startYear=2016&endYear=2025&indices=mndwi,ndci · EI VIELA live-testattu · yksi API-kutsu per vuosi per indeksi",
+      "/lake-timeseries": "BEM-E — takautuva kesakauden (touko-syyskuu) MNDWI+NDCI-aikasarja · ?bbox=...&startYear=2018&endYear=2025&indices=mndwi,ndci · EI VIELA live-testattu · yksi API-kutsu per vuosi per indeksi · HUOM: startYear<2018 EI TUETTU, L2A ei systemaattista Euroopassa ennen 2017-05",
       "/combined": "CORINE + NDVI rinnakkain, ristiintarkistus, yhdistetty D_f · ?bbox=...&grid=6&months=3",
       "/recovery": "Grid-sampled SYKE protected-area R proxy · ?bbox=...&grid=7 (n x n points, max 7x7)"
     },
@@ -766,7 +766,18 @@ async function handleLakeTimeseries(url, env) {
   if (!bboxStr) {
     return json({ error: "bbox-parametri on pakollinen (esim. Iisvesi: 26.167,62.567,27.067,63.467)" }, 400);
   }
-  const startYear = Math.max(2016, parseInt(url.searchParams.get("startYear") || "2016", 10)); // 2015 jatetty pois - Sentinel-2A kaynnistyi kesakuussa 2015, touko-kuu 2015 ei kattavaa dataa
+  // KORJATTU 2026-07-27 (loydetty live-testissa): startYear=2016 palautti
+  // "data":[] KAIKILLE vuoden 2016 kutsuille. Syy varmistettu virallisesta
+  // lahteesta (sentinels.copernicus.eu): "L2A production is now systematic
+  // over Europe and dissemination... started in May 2017." Vuosi 2016 ON
+  // SIIS ENNEN L2A-tuotteiden systemaattista tuotantoa Euroopan ylla - tama
+  // EI ole koodivirhe vaan aito datan saatavuusraja. 2017 jatetty MYOS pois
+  // varmuuden vuoksi (siirtymavuosi, tuotanto alkoi VASTA toukokuussa,
+  // ei kata koko touko-syyskuu-ikkunaa luotettavasti). Oletus siirretty
+  // 2018:aan - kaventaa ikkunan 10:sta 8:aan vuoteen (2018-2025), mutta
+  // silla varmistetaan etta jokainen vuosi on TAYSIN systemaattisen
+  // L2A-tuotannon piirissa.
+  const startYear = Math.max(2018, parseInt(url.searchParams.get("startYear") || "2018", 10));
   let endYear = parseInt(url.searchParams.get("endYear") || String(new Date().getUTCFullYear() - 1), 10);
 
   const now = new Date();
