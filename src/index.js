@@ -793,15 +793,18 @@ async function handleLakeTimeseries(url, env) {
   const indicesParam = (url.searchParams.get("indices") || "mndwi,ndci").split(",").map(s => s.trim());
   // VALIAIKAINEN DIAGNOSTIIKKAPARAMETRI 2026-07-27: 2018-testi palautti
   // yha "data":[] vaikka L2A-vuosiraja (2017-05) pitaisi olla ylitetty -
-  // tama kumoaa alkuperaisen hypoteesin. debugEndDay mahdollistaa
-  // LYHYEMMAN ikkunan testaamisen (esim. vain kesakuu, ~30pv) erottamaan
-  // onko kyse itse AIKAVALIN PITUUDESTA (153pv) eika vuodesta.
-  const debugEndDay = url.searchParams.get("debugEndDay"); // esim. "06-30" testaa vain touko-kesakuu
+  // tama kumoaa alkuperaisen hypoteesin. debugEndDay/debugStartDay
+  // mahdollistavat lyhyemman ikkunan (aina yhteen paivaan asti)
+  // testaamisen erottamaan onko kyse itse AIKAVALIN PITUUDESTA
+  // eika vuodesta - esim. debugStartDay=07-15&debugEndDay=07-15 testaa
+  // TASAN yhden paivan (15.7.).
+  const debugEndDay = url.searchParams.get("debugEndDay"); // esim. "06-30"
+  const debugStartDay = url.searchParams.get("debugStartDay"); // esim. "07-15" - oletus "05-01" jos puuttuu
 
   const results = [];
 
   for (let year = startYear; year <= endYear; year++) {
-    const from = `${year}-05-01T00:00:00Z`;
+    const from = debugStartDay ? `${year}-${debugStartDay}T00:00:00Z` : `${year}-05-01T00:00:00Z`;
     const to = debugEndDay ? `${year}-${debugEndDay}T23:59:59Z` : `${year}-09-30T23:59:59Z`;
     const row = { year, summer_window: { from, to } };
 
