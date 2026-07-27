@@ -709,7 +709,7 @@ async function handleNDCIImage(url, env) {
 // on yksinkertainen jaksotus alkaen timeRange.from:sta, EI tue "sama
 // kalenteri-ikkuna joka vuodelta, ohita talvi" -tyyppista suodatusta
 // yhdessa kutsussa - tama on varmistettu johtopaatos, ei arvattu oletus.
-async function runStatsForRange(evalscript, bboxStr, fromISO, toISO, env) {
+async function runStatsForRange(evalscript, bboxStr, fromISO, toISO, env, maxCloudCoverage = 40) {
   const [minLon, minLat, maxLon, maxLat] = bboxStr.split(",").map(Number);
   const token = await getCopernicusToken(env);
   const spanDays = Math.max(1, Math.round((new Date(toISO) - new Date(fromISO)) / 86400000));
@@ -720,7 +720,7 @@ async function runStatsForRange(evalscript, bboxStr, fromISO, toISO, env) {
         bbox: [minLon, minLat, maxLon, maxLat],
         properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" }
       },
-      data: [{ type: "sentinel-2-l2a", dataFilter: { maxCloudCoverage: 40, mosaickingOrder: "leastCC" } }]
+      data: [{ type: "sentinel-2-l2a", dataFilter: { maxCloudCoverage, mosaickingOrder: "leastCC" } }]
     },
     aggregation: {
       timeRange: { from: fromISO, to: toISO },
@@ -800,6 +800,12 @@ async function handleLakeTimeseries(url, env) {
   // TASAN yhden paivan (15.7.).
   const debugEndDay = url.searchParams.get("debugEndDay"); // esim. "06-30"
   const debugStartDay = url.searchParams.get("debugStartDay"); // esim. "07-15" - oletus "05-01" jos puuttuu
+  // Kayttajan oma huomio 2026-07-27: Sentinel-2:n ylilennot ovat
+  // diskreetteja tapahtumia, data saadaan vain jos pilvipeite ei ole
+  // liiallinen. debugMaxCloud mahdollistaa pilvisuodattimen loysentamisen
+  // (esim. 100 = ei suodatinta ollenkaan) testataksemme onko 40%:n raja
+  // liian tiukka juuri talle bbox:ille/ajanjaksolle.
+  const debugMaxCloud = parseInt(url.searchParams.get("debugMaxCloud") || "40", 10);
 
   const results = [];
 
@@ -819,14 +825,14 @@ async function handleLakeTimeseries(url, env) {
 
     if (indicesParam.includes("mndwi")) {
       try {
-        row.mndwi = await runStatsForRange(MNDWI_EVALSCRIPT, bboxStr, from, to, env);
+        row.mndwi = await runStatsForRange(MNDWI_EVALSCRIPT, bboxStr, from, to, env, debugMaxCloud);
       } catch (e) {
         row.mndwi = null; row.mndwi_error = e.message;
       }
     }
     if (indicesParam.includes("ndci")) {
       try {
-        row.ndci = await runStatsForRange(NDCI_EVALSCRIPT, bboxStr, from, to, env);
+        row.ndci = await runStatsForRange(NDCI_EVALSCRIPT, bboxStr, from, to, env, debugMaxCloud);
       } catch (e) {
         row.ndci = null; row.ndci_error = e.message;
       }
