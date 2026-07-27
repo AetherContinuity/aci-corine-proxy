@@ -244,6 +244,7 @@ function handleStatus() {
       "/ndci": "BEM-E — NDCI-tilasto [B-luokka, KOKEELLINEN] · ?bbox=...&months=3 · vain vesipikselit (SCL==6) · EI VIELA live-testattu",
       "/ndci-image": "BEM-E — renderoitu NDCI-kuva (sininen-vihrea-keltainen-punainen) [B-luokka] · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
       "/lake-timeseries": "BEM-E — takautuva kesakauden (touko-syyskuu) MNDWI+NDCI-aikasarja · ?bbox=...&startYear=2018&endYear=2025&indices=mndwi,ndci · EI VIELA live-testattu · yksi API-kutsu per vuosi per indeksi · HUOM: startYear<2018 EI TUETTU, L2A ei systemaattista Euroopassa ennen 2017-05",
+      "/catalog-check": "Diagnostiikka - STAC Catalog API -haku, tarkistaa onko Sentinel-2 L2A -skeneja olemassa · ?bbox=...&from=...&to=... (ISO 8601)",
       "/combined": "CORINE + NDVI rinnakkain, ristiintarkistus, yhdistetty D_f · ?bbox=...&grid=6&months=3",
       "/recovery": "Grid-sampled SYKE protected-area R proxy · ?bbox=...&grid=7 (n x n points, max 7x7)"
     },
@@ -757,6 +758,69 @@ async function runStatsForRange(evalscript, bboxStr, fromISO, toISO, env, maxClo
 // yksittaiseen kuvaan. Kehys: 2015 alkaen (Sentinel-2:n oma alku),
 // verrattavissa HEM:n pitkaan HEPP-sarjaan (1959-2026).
 //
+// ── Catalog API -tarkistus (STAC-haku) — käyttäjän oma tuore löydös 2026-07-27 ──
+// Statistical API on raportoitu ajoittain epavakaaksi (data:[] vaikka
+// dataa pitaisi olla, LTA-arkistoidun historiallisen datan ongelmat).
+// Tama reitti kayttaa ERI, yksinkertaisempaa STAC-pohjaista Catalog API:a
+// tarkistamaan SUORAAN onko yhtaan Sentinel-2 L2A -skeneta olemassa
+// annetulle bbox:ille/aikavalille - riippumaton Statistical API:n
+// omista mahdollisista aggregointibugeista.
+async function handleCatalogCheck(url, env) {
+  const bboxStr = url.searchParams.get("bbox");
+  const from = url.searchParams.get("from");
+  const to = url.searchParams.get("to");
+  if (!bboxStr || !from || !to) {
+    return json({ error: "bbox, from ja to (ISO 8601) ovat pakollisia" }, 400);
+  }
+  if (!env.COPERNICUS_CLIENT_ID || !env.COPERNICUS_CLIENT_SECRET) {
+    return json({ error: "COPERNICUS_CLIENT_ID / COPERNICUS_CLIENT_SECRET not configured" }, 500);
+  }
+
+  try {
+    const [minLon, minLat, maxLon, maxLat] = bboxStr.split(",").map(Number);
+    const token = await getCopernicusToken(env);
+
+    const searchBody = {
+      bbox: [minLon, minLat, maxLon, maxLat],
+      datetime: `${from}/${to}`,
+      collections: ["sentinel-2-l2a"],
+      limit: 20
+    };
+
+    const r = await fetch("https://sh.dataspace.copernicus.eu/api/v1/catalog/1.0.0/search", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/geo+json",
+        "Authorization": `Bearer ${token}`
+      },
+      body: JSON.stringify(searchBody)
+    });
+    if (!r.ok) {
+      return json({ error: `Catalog API: HTTP ${r.status} ${await r.text()}` }, 502);
+    }
+    const data = await r.json();
+    const features = data.features || [];
+    const scenes = features.map(f => ({
+      datetime: f.properties?.datetime,
+      cloudCover: f.properties?.["eo:cloud_cover"],
+      id: f.id
+    }));
+
+    return json({
+      bem_e_component: "Catalog API -tarkistus (STAC search) - diagnostiikka",
+      bbox: bboxStr,
+      datetime_range: `${from}/${to}`,
+      scene_count: scenes.length,
+      context: data.context,
+      scenes,
+      caveat: "Tama tarkistaa ONKO skeneja olemassa - EI kerro suoraan miksi Statistical API palautti data:[], mutta antaa riippumattoman vahvistuksen datan olemassaolosta."
+    });
+  } catch (e) {
+    return json({ error: e.message, step: "catalog-check" }, 502);
+  }
+}
+
 // HUOM rajaus: nykyinen vuosi (kuluva kesa, esim. 2026 heinakuussa) EI
 // VOI olla taydellinen (touko-syyskuu ei ole viela paattynyt) - jatetaan
 // AUTOMAATTISESTI POIS jos endYear >= nykyinen vuosi JA kuluva paivamaara
@@ -1174,6 +1238,8 @@ export default {
         return await handleNDCIImage(url, env);
       } else if (path === "/lake-timeseries") {
         return await handleLakeTimeseries(url, env);
+      } else if (path === "/catalog-check") {
+        return await handleCatalogCheck(url, env);
       } else if (path === "/combined") {
         return await handleCombined(url, env);
       } else if (path === "/recovery") {
