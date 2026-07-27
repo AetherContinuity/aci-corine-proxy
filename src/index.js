@@ -739,7 +739,16 @@ async function runStatsForRange(evalscript, bboxStr, fromISO, toISO, env) {
   if (!r.ok) throw new Error(`Statistical API: HTTP ${r.status} ${await r.text()}`);
   const data = await r.json();
   const interval = data?.data?.[0];
-  return interval?.outputs?.data?.bands?.B0?.stats || null;
+  const stats = interval?.outputs?.data?.bands?.B0?.stats;
+  if (!stats) {
+    // KORJATTU 2026-07-27: alkuperainen koodi palautti hiljaa null jos
+    // rakenne ei tasmannyt - loydettiin live-testissa etta /lake-timeseries
+    // palautti kaikille 10 vuodelle null:in ilman virhetta. Nyt heitetaan
+    // POIKKEUS jossa mukana RAAKA vastaus, jotta seuraava testi paljastaa
+    // tarkalleen mika API:n oma vastausrakenne oli.
+    throw new Error(`stats-rakenne puuttuu. spanDays=${spanDays}, data.data.length=${data?.data?.length}, raw=${JSON.stringify(data).slice(0, 500)}`);
+  }
+  return stats;
 }
 
 // Kesakauden (touko-syyskuu) MNDWI+NDCI-aikasarja usealle vuodelle.
