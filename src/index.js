@@ -804,8 +804,17 @@ async function handleLakeTimeseries(url, env) {
   const results = [];
 
   for (let year = startYear; year <= endYear; year++) {
-    const from = debugStartDay ? `${year}-${debugStartDay}T00:00:00Z` : `${year}-05-01T00:00:00Z`;
-    const to = debugEndDay ? `${year}-${debugEndDay}T23:59:59Z` : `${year}-09-30T23:59:59Z`;
+    // KORJATTU 2026-07-27: kaikki neljä testattua aikavalin pituutta
+    // (153, 78, 61, 2 paivaa) epaonnistuivat IDENTTISESTI - tama sulki
+    // pois aikavalin PITUUDEN kokonaan. Jaljelle jai vain yksi ero
+    // toimiviin /mndwi//ndci-kutsuihin: nama kayttivat kasin rakennettua
+    // "YYYY-MM-DDTHH:MM:SSZ" -muotoa (EI millisekunteja), kun toimivat
+    // kutsut kayttivat now.toISOString():a (JOKA SISALTAA millisekunnit,
+    // esim. ".832Z"). Korjattu kayttamaan new Date(...).toISOString():a
+    // tassakin - varmistaa TASMALLEEN saman merkkijonomuodon kuin toimiva
+    // koodipolku, ei vain samaa PAIVAMAARAA eri muodossa.
+    const from = new Date(debugStartDay ? `${year}-${debugStartDay}T00:00:00Z` : `${year}-05-01T00:00:00Z`).toISOString();
+    const to = new Date(debugEndDay ? `${year}-${debugEndDay}T23:59:59Z` : `${year}-09-30T23:59:59Z`).toISOString();
     const row = { year, summer_window: { from, to } };
 
     if (indicesParam.includes("mndwi")) {
