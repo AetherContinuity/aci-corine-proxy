@@ -243,6 +243,7 @@ function handleStatus() {
       "/mndwi-image": "BEM-E — renderoitu MNDWI-kuva (ruskea-vihrea-sininen) · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
       "/ndci": "BEM-E — NDCI-tilasto [B-luokka, KOKEELLINEN] · ?bbox=...&months=3 · vain vesipikselit (SCL==6) · EI VIELA live-testattu",
       "/ndci-image": "BEM-E — renderoitu NDCI-kuva (sininen-vihrea-keltainen-punainen) [B-luokka] · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
+      "/lake-timeseries": "BEM-E — takautuva kesakauden (touko-syyskuu) MNDWI+NDCI-aikasarja · ?bbox=...&startYear=2016&endYear=2025&indices=mndwi,ndci · EI VIELA live-testattu · yksi API-kutsu per vuosi per indeksi",
       "/combined": "CORINE + NDVI rinnakkain, ristiintarkistus, yhdistetty D_f · ?bbox=...&grid=6&months=3",
       "/recovery": "Grid-sampled SYKE protected-area R proxy · ?bbox=...&grid=7 (n x n points, max 7x7)"
     },
@@ -700,6 +701,110 @@ async function handleNDCIImage(url, env) {
   }
 }
 
+// ── BEM-E — takautuva aikasarja (kayttajan oma suunnitelma 2026-07-27) ──
+// Yleinen apufunktio: yksi Statistical API -kutsu ANNETULLE aikavalille
+// (ei "months back from now" kuten computeMNDWI/computeNDCI, vaan
+// tasmalliset from/to-paivamaarat). Kaytetaan aikasarjareitissa - yksi
+// kutsu per vuosi per indeksi, koska Statistical APIn oma aggregationInterval
+// on yksinkertainen jaksotus alkaen timeRange.from:sta, EI tue "sama
+// kalenteri-ikkuna joka vuodelta, ohita talvi" -tyyppista suodatusta
+// yhdessa kutsussa - tama on varmistettu johtopaatos, ei arvattu oletus.
+async function runStatsForRange(evalscript, bboxStr, fromISO, toISO, env) {
+  const [minLon, minLat, maxLon, maxLat] = bboxStr.split(",").map(Number);
+  const token = await getCopernicusToken(env);
+  const spanDays = Math.max(1, Math.round((new Date(toISO) - new Date(fromISO)) / 86400000));
+
+  const statsRequest = {
+    input: {
+      bounds: {
+        bbox: [minLon, minLat, maxLon, maxLat],
+        properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" }
+      },
+      data: [{ type: "sentinel-2-l2a", dataFilter: { maxCloudCoverage: 40, mosaickingOrder: "leastCC" } }]
+    },
+    aggregation: {
+      timeRange: { from: fromISO, to: toISO },
+      aggregationInterval: { of: `P${spanDays}D` }, // koko ikkuna yhtena valina - yksi piste per vuosi
+      evalscript,
+      width: 150,
+      height: 240
+    }
+  };
+
+  const r = await fetch("https://sh.dataspace.copernicus.eu/statistics/v1", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Accept": "application/json", "Authorization": `Bearer ${token}` },
+    body: JSON.stringify(statsRequest)
+  });
+  if (!r.ok) throw new Error(`Statistical API: HTTP ${r.status} ${await r.text()}`);
+  const data = await r.json();
+  const interval = data?.data?.[0];
+  return interval?.outputs?.data?.bands?.B0?.stats || null;
+}
+
+// Kesakauden (touko-syyskuu) MNDWI+NDCI-aikasarja usealle vuodelle.
+// KAYTTAJAN OMA SUUNNITELMA 2026-07-26/27: kesakauden mediaani/keskiarvo
+// per vuosi vahentaa pilvien/satunnaissateiden kohinaa verrattuna
+// yksittaiseen kuvaan. Kehys: 2015 alkaen (Sentinel-2:n oma alku),
+// verrattavissa HEM:n pitkaan HEPP-sarjaan (1959-2026).
+//
+// HUOM rajaus: nykyinen vuosi (kuluva kesa, esim. 2026 heinakuussa) EI
+// VOI olla taydellinen (touko-syyskuu ei ole viela paattynyt) - jatetaan
+// AUTOMAATTISESTI POIS jos endYear >= nykyinen vuosi JA kuluva paivamaara
+// on ennen syyskuun loppua, jotta osittainen kesa ei vaarista vertailua.
+async function handleLakeTimeseries(url, env) {
+  const bboxStr = url.searchParams.get("bbox");
+  if (!bboxStr) {
+    return json({ error: "bbox-parametri on pakollinen (esim. Iisvesi: 26.167,62.567,27.067,63.467)" }, 400);
+  }
+  const startYear = Math.max(2016, parseInt(url.searchParams.get("startYear") || "2016", 10)); // 2015 jatetty pois - Sentinel-2A kaynnistyi kesakuussa 2015, touko-kuu 2015 ei kattavaa dataa
+  let endYear = parseInt(url.searchParams.get("endYear") || String(new Date().getUTCFullYear() - 1), 10);
+
+  const now = new Date();
+  const currentYear = now.getUTCFullYear();
+  const summerEndedThisYear = now.getUTCMonth() >= 9; // lokakuu (0-indeksoitu 9) tai myohemmin = syyskuu paattynyt
+  if (endYear >= currentYear && !(endYear === currentYear && summerEndedThisYear)) {
+    endYear = currentYear - 1; // kuluva, kesken oleva kesa jatetty pois
+  }
+  if (endYear < startYear) {
+    return json({ error: `Ei taydellisia kesakausia valilla ${startYear}-${url.searchParams.get('endYear')}` }, 400);
+  }
+
+  const indicesParam = (url.searchParams.get("indices") || "mndwi,ndci").split(",").map(s => s.trim());
+  const results = [];
+
+  for (let year = startYear; year <= endYear; year++) {
+    const from = `${year}-05-01T00:00:00Z`;
+    const to = `${year}-09-30T23:59:59Z`;
+    const row = { year, summer_window: { from, to } };
+
+    if (indicesParam.includes("mndwi")) {
+      try {
+        row.mndwi = await runStatsForRange(MNDWI_EVALSCRIPT, bboxStr, from, to, env);
+      } catch (e) {
+        row.mndwi = null; row.mndwi_error = e.message;
+      }
+    }
+    if (indicesParam.includes("ndci")) {
+      try {
+        row.ndci = await runStatsForRange(NDCI_EVALSCRIPT, bboxStr, from, to, env);
+      } catch (e) {
+        row.ndci = null; row.ndci_error = e.message;
+      }
+    }
+    results.push(row);
+  }
+
+  return json({
+    bem_e_component: "Takautuva kesakauden aikasarja (MNDWI + NDCI)",
+    bbox: bboxStr,
+    years: `${startYear}-${endYear}`,
+    summer_window: "touko-syyskuu (kesken oleva kuluva kesa jatetty automaattisesti pois)",
+    rows: results,
+    caveat: "EI VIELA live-testattu (kirjoitettu 2026-07-27). Yksi Statistical API -kutsu per vuosi per indeksi - kuluttaa Process Unit -kiintiota vastaavasti (esim. 10 vuotta x 2 indeksia = 20 kutsua). Jokaisen rivin oma sampleCount/noDataCount tulisi tarkistaa ennen tulkintaa, sama periaate kuin yksittaisilla /mndwi ja /ndci -reiteilla."
+  });
+}
+
 async function getCopernicusToken(env) {
   const tokenUrl = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token";
   const body = new URLSearchParams({
@@ -1022,6 +1127,8 @@ export default {
         return await handleNDCI(url, env);
       } else if (path === "/ndci-image") {
         return await handleNDCIImage(url, env);
+      } else if (path === "/lake-timeseries") {
+        return await handleLakeTimeseries(url, env);
       } else if (path === "/combined") {
         return await handleCombined(url, env);
       } else if (path === "/recovery") {
