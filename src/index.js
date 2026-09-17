@@ -9,12 +9,16 @@
 // putki, kuvattu TN-015:n arkkitehtuuriosiossa, "Pre-development"-tilassa).
 
 import IISVESI_MASK from "./iisvesi_ndci_mask.json";
+import IISVESI_RAW_MASK from "./iisvesi_lake_raw.json";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, OPTIONS",
   "Access-Control-Allow-Headers": "*"
 };
+
+// Bumpataan jokaisella BEM-E-korjauskierroksella - /version-reitti (item 4).
+const PROXY_VERSION = "0.6-bem-e-resolution-fix";
 
 const DEFAULT_BBOX = "26.00,62.40,27.50,63.50"; // Rautalammin reitti pilottialue
 
@@ -31,12 +35,49 @@ const IISVESI_BBOX = "26.695,62.666,27.051,63.004";
 
 // SYKE JarviWiki-jarvirekisteri 14.722.1.001, vahvistettu 2026-09-17:
 // Iisvesi+Virmasvesi+Rasvanki YHTEENSA 164.47 km^2 (eteläinen allas
-// Nokisenkosken alapuolella EI mukana - jos olisi, koko jarvi olisi
-// n. 181 km^2; polygonin rajaus vahvistettu oikeaksi tama vasten).
-// Tama on YLARAJA vesiosuuden vertailulle (sisaltaa kasvillisuuslahdet);
-// raw_area_km2 (156.9, IISVESI_MASK.properties) on ALARAJA (pysyva
-// avovesi). Ks. computeMNDWI().
+// Nokisenkosken alapuolella EI mukana). IISVESI_RAW_MASK (rajaamaton
+// jarvipolygoni, 157.9 km^2, 4310 karkea, EPSG:4326) kayttajan omasta
+// Sentinel-2-maskista - kaytetaan ?polygon=iisvesi_raw:lla MNDWI:n
+// jarvi-kohtaiseen mittariin (odotettu vesiosuus >=95%).
 const IISVESI_AREA_KM2 = 164.47;
+
+// KORJATTU 2026-09 (kayttajan mittaus): sampleCount oli 36000 KAIKILLA
+// bbox/polygon-kooilla, koska width/height oli kiinnitetty vakioksi -
+// pikselikoko vaihteli rajauksen mukaan (Iisveden polygonissa ~130 m,
+// ei 20 m). Tama teki -40 m rantapuskurista merkityksettoman (yksi
+// pikseli on puskuria leveampi). Korjaus: resx/resy Sentinel-2:n omalla
+// ~20 m resoluutiolla, EI kiinnitetty pikselimaara. HUOM aiempi bugi
+// (2026-07-08, "astevs-metri-yksikkobugi"): resx/resy on ANNETTAVA
+// bounds-CRS:n omissa yksikoissa - EPSG:4326:lla se on ASTEITA, ei
+// metreja. computeResxResy() laskee asteen vastaavuuden oikein
+// (resy = m/111320, resx = m/(111320*cos(keskileveysaste))).
+const RESOLUTION_M = 20;
+
+function computeResxResy(minLat, maxLat, resolutionM = RESOLUTION_M) {
+  const midLatRad = ((minLat + maxLat) / 2) * Math.PI / 180;
+  const resy = resolutionM / 111320;
+  const resx = resolutionM / (111320 * Math.cos(midLatRad));
+  return { resx, resy };
+}
+
+// Laskee GeoJSON-geometrian (Polygon/MultiPolygon) bbox:in [minLon,minLat,
+// maxLon,maxLat] - tarvitaan resx/resy-laskentaan kun kutsu kayttaa
+// polygon-parametria bbox:in sijaan.
+function geometryBounds(geometry) {
+  let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
+  function walk(c) {
+    if (typeof c[0] === "number") {
+      if (c[0] < minLon) minLon = c[0];
+      if (c[0] > maxLon) maxLon = c[0];
+      if (c[1] < minLat) minLat = c[1];
+      if (c[1] > maxLat) maxLat = c[1];
+    } else {
+      for (const x of c) walk(x);
+    }
+  }
+  walk(geometry.coordinates);
+  return [minLon, minLat, maxLon, maxLat];
+}
 
 const SYKE_WMS = "https://paikkatiedot.ymparisto.fi/geoserver/inspire_lc/wms";
 const LAYER = "LC.LandCoverSurfaces.2018";
@@ -249,21 +290,34 @@ async function handleFragmentation(url) {
   });
 }
 
+function handleVersion() {
+  // /version — sama tarkoitus kuin aci-nve-proxyn ja metsaproxyn /version:
+  // kevyt, ei-autentikoitu reitti deployn tarkistukseen (ei kutsu
+  // Copernicusta, ei API-avaimia tarvita).
+  return json({
+    proxy: "aci-corine-proxy",
+    version: PROXY_VERSION,
+    changelog_latest: "2026-09-17: resx/resy-resoluutiokorjaus (item 1), MNDWI-pilvimaski (item 3), oikea Iisvesi-bbox+polygonit, /version-reitti (item 4)",
+    deployed_check: new Date().toISOString()
+  });
+}
+
 function handleStatus() {
   return json({
     proxy: "aci-corine-proxy",
-    version: "0.5-synctest",
+    version: PROXY_VERSION,
     purpose: "D_f and R data sources for BEM — Biodiversity Endurance Monitor",
     pilot: "Rautalammin reitti",
     default_bbox: DEFAULT_BBOX,
     routes: {
       "/status": "Proxy status",
+      "/version": "Deploy-tarkistus (versio + changelog)",
       "/fragmentation": "Grid-sampled CORINE D_f proxy · ?bbox=...&grid=7 (n x n points, max 7x7)",
       "/ndvi": "Sentinel Hub Statistical API — NDVI mean/stDev over bbox · ?bbox=...&months=3",
       "/ndvi-image": "Sentinel Hub Process API — renderoitu NDVI-kuva (vihrea-keltainen-punainen) · ?bbox=...&months=3&w=480&h=350",
-      "/mndwi": "BEM-E (Aquatic Extension) — MNDWI-tilasto [A-luokka] · ?bbox=26.695,62.666,27.051,63.004&months=3 (Iisvesi-ryhma, vahvistettu 2026-09-17) · palauttaa myos expected_water_fraction_pct-vertailuarvon Iisvedelle · EI VIELA live-testattu",
+      "/mndwi": "BEM-E (Aquatic Extension) — MNDWI-tilasto [A-luokka] · ?bbox=26.695,62.666,27.051,63.004&months=3 (Iisvesi-ryhma) TAI ?polygon=iisvesi_raw (jarvi-kohtainen, odotus >=95%) · resx/resy ~20m, SCL-pilvimaski · EI VIELA live-testattu",
       "/mndwi-image": "BEM-E — renderoitu MNDWI-kuva (ruskea-vihrea-sininen) · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
-      "/ndci": "BEM-E — NDCI-tilasto [B-luokka, KOKEELLINEN] · ?bbox=...&months=3 TAI ?polygon=iisvesi (sisainen, -40m rantapuskuroitu maski, 137.4 km^2) TAI ?polygon=<oma GeoJSON>&months=3 · vain vesipikselit (SCL==6) · EI VIELA live-testattu",
+      "/ndci": "BEM-E — NDCI-tilasto [B-luokka, KOKEELLINEN] · ?bbox=...&months=3 TAI ?polygon=iisvesi (sisainen, -40m rantapuskuroitu maski, 137.4 km^2) TAI ?polygon=<oma GeoJSON>&months=3 · vain vesipikselit (SCL==6) · resx/resy ~20m · EI VIELA live-testattu",
       "/ndci-image": "BEM-E — renderoitu NDCI-kuva (sininen-vihrea-keltainen-punainen) [B-luokka] · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
       "/lake-timeseries": "BEM-E — takautuva kesakauden (touko-syyskuu) MNDWI+NDCI-aikasarja · ?bbox=...&startYear=2018&endYear=2025&indices=mndwi,ndci · EI VIELA live-testattu · yksi API-kutsu per vuosi per indeksi · HUOM: startYear<2018 EI TUETTU, L2A ei systemaattista Euroopassa ennen 2017-05",
       "/catalog-check": "Diagnostiikka - STAC Catalog API -haku, tarkistaa onko Sentinel-2 L2A -skeneja olemassa JA Sen2Cor processing_baseline -yhtenaisyys (SCL-vesiluokan vertailukelpoisuus) · ?bbox=...&from=...&to=... (ISO 8601)",
@@ -346,11 +400,17 @@ function evaluatePixel(samples) {
 // Rautalammin reitin omaa dataa vastaan (ei live-testattu, ks. caveat).
 const MNDWI_WATER_THRESHOLD = 0;
 
+// KORJATTU 2026-09 (item 3, kayttajan mittaus: noDataCount 23 = pilvet
+// laskettiin mukaan tilastoon). SCL-pilvimaski lisatty - EI rajata
+// pelkkiin vesipikseleihin (se olisi NDCI:n logiikka, ei MNDWI:n oma
+// tarkoitus). Poistetaan: 0 NO_DATA, 1 SATURATED_DEFECTIVE,
+// 3 CLOUD_SHADOWS, 8 CLOUD_MEDIUM_PROBABILITY, 9 CLOUD_HIGH_PROBABILITY,
+// 10 THIN_CIRRUS. Vesi (6), maa (2,4,5,7) ja lumi/jaa (11) jaavat mukaan.
 const MNDWI_EVALSCRIPT = `
 //VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["B03", "B11", "dataMask"] }],
+    input: [{ bands: ["B03", "B11", "SCL", "dataMask"] }],
     output: [
       { id: "data", bands: 1 },
       { id: "water", bands: 1 },
@@ -362,30 +422,54 @@ function evaluatePixel(samples) {
   let mndwi = (samples.B03 - samples.B11) / (samples.B03 + samples.B11);
   let valid = (samples.B03 + samples.B11 == 0) ? 0 : 1;
   let water = (mndwi > ${MNDWI_WATER_THRESHOLD}) ? 1 : 0;
+  let scl = samples.SCL;
+  let cloudFree = (scl == 0 || scl == 1 || scl == 3 || scl == 8 || scl == 9 || scl == 10) ? 0 : 1;
   return {
     data: [mndwi],
     water: [water],
-    dataMask: [samples.dataMask * valid]
+    dataMask: [samples.dataMask * valid * cloudFree]
   };
 }
 `;
 
-async function computeMNDWI(bboxStr, months, env) {
+// Mitattu 2026-09-17 (kayttajan Sentinel-2-maski): koko IISVESI_BBOX:in
+// pysyva avovesi on 37.0% - EI Iisveden 156.9-164.47 km^2 / bbox-ala,
+// koska rajaukseen kuuluu myos osia Niinivedesta, Nokisenkosken alapuolinen
+// allas ja muita jarvia. Aiempi laskukaava (Iisveden pinta-ala jaettuna
+// bbox-alalla) OLETTI VIRHEELLISESTI etta bbox:in ainoa vesi on Iisvesi -
+// mitattu 33.7% osui talla oletuksella "vaarin" vaikka oli oikeasti
+// sopusoinnussa 37.0%:n kanssa (karkea 130m-pikselikoko jatti osan
+// rantavedesta laskematta, korjattu resx/resy-muutoksella yllä).
+const IISVESI_BBOX_WATER_FRACTION_PCT = 37.0;
+
+// Iisvesi-JARVI-kohtainen mittari (?polygon=iisvesi_raw, IISVESI_RAW_MASK
+// - rajaamaton jarvipolygoni, EI -40m puskuria, 157.9 km^2). Odotettu
+// vesiosuus TAMAN polygonin SISALLA on korkea (>=95%) koska polygoni ITSE
+// on jarven rajaus - pudotus sen alle on signaali (kuivuus/kasvillisuus),
+// ei mittausvirhe.
+const IISVESI_RAW_EXPECTED_WATER_FRACTION_PCT_MIN = 95.0;
+
+async function computeMNDWI(bboxStr, months, env, polygonGeoJson) {
   if (!env.COPERNICUS_CLIENT_ID || !env.COPERNICUS_CLIENT_SECRET) {
     throw new Error("COPERNICUS_CLIENT_ID / COPERNICUS_CLIENT_SECRET not configured (wrangler secret put ...)");
   }
-  const [minLon, minLat, maxLon, maxLat] = bboxStr.split(",").map(Number);
   const now = new Date();
   const to = now.toISOString();
   const from = new Date(now.getTime() - months * 30 * 24 * 3600 * 1000).toISOString();
   const token = await getCopernicusToken(env);
 
+  const [minLon, minLat, maxLon, maxLat] = polygonGeoJson
+    ? geometryBounds(polygonGeoJson)
+    : bboxStr.split(",").map(Number);
+  const { resx, resy } = computeResxResy(minLat, maxLat);
+
+  const bounds = polygonGeoJson
+    ? { geometry: polygonGeoJson, properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } }
+    : { bbox: [minLon, minLat, maxLon, maxLat], properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } };
+
   const statsRequest = {
     input: {
-      bounds: {
-        bbox: [minLon, minLat, maxLon, maxLat],
-        properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" }
-      },
+      bounds,
       data: [
         { type: "sentinel-2-l2a", dataFilter: { maxCloudCoverage: 40, mosaickingOrder: "leastCC" } }
       ]
@@ -394,10 +478,12 @@ async function computeMNDWI(bboxStr, months, env) {
       timeRange: { from, to },
       aggregationInterval: { of: `P${months * 30}D` },
       evalscript: MNDWI_EVALSCRIPT,
-      // width/height, EI resx/resy - sama astevs-metri-yksikkobugi (2026-07-08)
-      // jonka NDVI-koodi jo valtti, sama varovaisuus tassa.
-      width: 150,
-      height: 240
+      // KORJATTU 2026-09 (item 1, kayttajan mittaus: sampleCount oli
+      // kiinteasti 36000 riippumatta rajauksen koosta, koska tassa oli
+      // width/height). resx/resy Sentinel-2:n ~20m resoluutiolla, EPSG:4326-
+      // ASTEINA (ei metreina - ks. RESOLUTION_M-kommentti ylla, aiempi
+      // 2026-07-08-bugi oli juuri tama yksikkosekaannus).
+      resx, resy
     }
   };
 
@@ -419,7 +505,7 @@ async function computeMNDWI(bboxStr, months, env) {
   const waterStats = interval?.outputs?.water?.bands?.B0?.stats;
 
   if (!stats) {
-    return { error: "unexpected_response_shape", raw_response: data, time_range: { from, to } };
+    return { error: "unexpected_response_shape", raw_response: data, time_range: { from, to }, resolution_m: RESOLUTION_M };
   }
 
   // vesipikselien osuus = binaarisen water-kaistan (mndwi>kynnys ? 1 : 0)
@@ -427,67 +513,69 @@ async function computeMNDWI(bboxStr, months, env) {
   // manuaalisesti histogrammia, mean(0/1) == osuus suoraan.
   const waterFractionPct = waterStats ? Math.round(waterStats.mean * 1000) / 10 : null;
 
-  // Vertailuvali Iisvesi-ryhmalle (kayttaja 2026-09-17, kaksi lahdetta):
-  // - IISVESI_AREA_KM2 (164.47 km^2, SYKE JarviWiki-jarvirekisteri
-  //   14.722.1.001) = koko jarvi (Iisvesi+Virmasvesi+Rasvanki, ETELAINEN
-  //   allas Nokisenkosken alapuolella EI mukana - vahvistettu rekisterin
-  //   omalla alalla, koko jarvi olisi n. 181 km^2 jos se olisi mukana).
-  //   Tama on YLARAJA, koska sisaltaa matalat kasvillisuuslahdet.
-  // - raw_area_km2 (156.9 km^2, oma Sentinel-2-NIR<0.05-maski) = pysyva
-  //   AVOVESI, ALARAJA - kasvillisuuslahdet (nostavat NIR-heijastusta)
-  //   jaavat pois. Ero rekisteriin (7.6 km^2 / 4.6%) selittyy talla +
-  //   464 km:n rantaviivan 10-20m:n reunakaistalla.
-  // MNDWI>0 laskee osan kasvillisuudesta vedeksi, joten havaitun
-  // water_fraction_pct:n odotetaan osuvan NAIDEN VALIIN - poikkeama
-  // jompaankumpaan suuntaan on signaali (kuivuus/kasvillisuus/kynnys),
-  // ei virhe sinansa. bbox-pinta-ala arvioitu karkeasti astekoon ja
-  // keskileveysasteen kosinin kautta (EI tarkka projektio - riittava
-  // sanity-checkiin). Lasketaan vain jos bbox on IISVESI_BBOX.
-  let expectedWaterFractionPctUpper = null, expectedWaterFractionPctLower = null;
-  if (bboxStr === IISVESI_BBOX) {
-    const lonSpan = maxLon - minLon, latSpan = maxLat - minLat;
-    const midLatRad = ((minLat + maxLat) / 2) * Math.PI / 180;
-    const kmPerLonDeg = 111.32 * Math.cos(midLatRad);
-    const bboxAreaKm2 = (lonSpan * kmPerLonDeg) * (latSpan * 111.32);
-    const rawAreaKm2 = IISVESI_MASK.features[0].properties.raw_area_km2;
-    expectedWaterFractionPctUpper = Math.round((IISVESI_AREA_KM2 / bboxAreaKm2) * 1000) / 10;
-    expectedWaterFractionPctLower = Math.round((rawAreaKm2 / bboxAreaKm2) * 1000) / 10;
+  let expectedWaterFractionPct = null, expectedWaterFractionNote = undefined;
+  if (polygonGeoJson) {
+    expectedWaterFractionPct = IISVESI_RAW_EXPECTED_WATER_FRACTION_PCT_MIN;
+    expectedWaterFractionNote = "Jarvi-kohtainen mittari (?polygon=iisvesi_raw) - odotettu vesiosuus polygonin SISALLA >=95%, koska polygoni itse on jarven rajaus. Pudotus sen alle on signaali (kuivuus/kasvillisuus), ei mittausvirhe.";
+  } else if (bboxStr === IISVESI_BBOX) {
+    expectedWaterFractionPct = IISVESI_BBOX_WATER_FRACTION_PCT;
+    expectedWaterFractionNote = "Koko bbox:in pysyva avovesi, MITATTU kayttajan omasta Sentinel-2-maskista 2026-09-17 (37.0%) - EI Iisveden pinta-ala/bbox-ala, koska rajaukseen kuuluu myos Niinivetta, Nokisenkosken alapuolinen allas ja muita jarvia.";
   }
 
   return {
     time_range: { from, to },
     max_cloud_coverage_pct: 40,
+    resolution_m: RESOLUTION_M,
     mndwi_stats: stats,
     water_fraction_pct: waterFractionPct,
     water_threshold: MNDWI_WATER_THRESHOLD,
-    expected_water_fraction_pct_lower: expectedWaterFractionPctLower,
-    expected_water_fraction_pct_upper: expectedWaterFractionPctUpper,
+    expected_water_fraction_pct: expectedWaterFractionPct,
     grade: "A - vakiintunut (Xu 2006)",
     source: "Sentinel Hub Statistical API (Copernicus Data Space Ecosystem), Sentinel-2 L2A",
     caveat_water_fraction: waterFractionPct == null
       ? "water-kaistan tilastoa ei palautunut - tarkista raaka vastaus"
-      : `Kynnys MNDWI>${MNDWI_WATER_THRESHOLD} (Xu 2006 -oletus), EI kalibroitu taman jarven omaa dataa vastaan. EI VIELA live-testattu.`,
-    caveat_expected_water_fraction: expectedWaterFractionPctUpper == null
-      ? undefined
-      : "vertailuvali [lower, upper] = [pysyva avovesi 156.9 km^2, SYKE-jarvirekisteri 164.47 km^2] / bbox-ala. Havaitun water_fraction_pct:n odotetaan osuvan valiin (MNDWI>0 sisaltaa osan kasvillisuuslahdista) - poikkeama on signaali, ei automaattisesti virhe."
+      : `Kynnys MNDWI>${MNDWI_WATER_THRESHOLD} (Xu 2006 -oletus), EI kalibroitu taman jarven omaa dataa vastaan. Pilvet/nodata/varjot maskattu SCL:sta (item 3).`,
+    caveat_expected_water_fraction: expectedWaterFractionNote
   };
 }
 
 async function handleMNDWI(url, env) {
   const bboxStr = url.searchParams.get("bbox");
+  const polygonStr = url.searchParams.get("polygon");
   const months = Math.max(1, Math.min(12, parseInt(url.searchParams.get("months") || "3", 10)));
-  if (!bboxStr) {
-    return json({ error: "bbox-parametri on pakollinen (esim. Iisvesi: 26.695,62.666,27.051,63.004)" }, 400);
+
+  let polygonGeoJson = null, polygonSource = null;
+  if (polygonStr === "iisvesi_raw") {
+    // Jarvi-kohtainen mittari (item 2): rajaamaton jarvipolygoni,
+    // kayttajan Sentinel-2-maski 2026-09-17, 157.9 km^2.
+    polygonGeoJson = IISVESI_RAW_MASK.features[0].geometry;
+    polygonSource = "iisvesi_raw (sisainen, " + IISVESI_RAW_MASK.features[0].properties.area_km2 + " km^2, rekisteri " + IISVESI_RAW_MASK.features[0].properties.register_area_km2 + " km^2)";
+  } else if (polygonStr === "iisvesi") {
+    polygonGeoJson = IISVESI_MASK.features[0].geometry;
+    polygonSource = "iisvesi (sisainen, -40m puskuroitu, " + IISVESI_MASK.features[0].properties.area_km2 + " km^2)";
+  } else if (polygonStr) {
+    try {
+      polygonGeoJson = JSON.parse(polygonStr);
+      polygonSource = "custom";
+    } catch (e) {
+      return json({ error: `polygon ei ole kelvollista GeoJSON:ia (eika avainsana "iisvesi"/"iisvesi_raw"): ${e.message}` }, 400);
+    }
+  }
+
+  if (!bboxStr && !polygonGeoJson) {
+    return json({ error: "bbox- tai polygon-parametri on pakollinen (esim. Iisvesi bbox: 26.695,62.666,27.051,63.004, tai ?polygon=iisvesi_raw)" }, 400);
   }
 
   try {
-    const result = await computeMNDWI(bboxStr, months, env);
+    const result = await computeMNDWI(bboxStr, months, env, polygonGeoJson);
     return json({
       bem_e_component: "MNDWI (Aquatic Extension, A-luokka)",
       method: "sentinel_hub_statistical_api",
-      bbox: bboxStr,
+      bbox: polygonGeoJson ? null : bboxStr,
+      used_polygon: !!polygonGeoJson,
+      polygon_source: polygonSource,
       ...result,
-      caveat: "EI VIELA live-testattu tallle nimenomaiselle bbox:ille (kirjoitettu 2026-07-26). Cloud-aggregoitu tilasto koko bbox:in ja aikaikkunan yli, ei spatiaalinen ruudukko."
+      caveat: "EI VIELA live-testattu tallle nimenomaiselle bbox:ille/polygonille (kirjoitettu 2026-07-26, polygon-tuki+resx/resy lisatty 2026-09-17). Cloud-aggregoitu tilasto koko rajauksen ja aikaikkunan yli, ei spatiaalinen ruudukko."
     });
   } catch (e) {
     return json({ error: e.message, step: "mndwi" }, 502);
@@ -642,12 +730,14 @@ async function computeNDCI(bboxStr, months, env, polygonGeoJson) {
   // Turf.js/QGIS jarven rantaviiva-aineistosta) ja antaa ?polygon=
   // -parametrina. EI VIELA testattu (ei polygonia saatavilla tata
   // kirjoittaessa, eika verkkoyhteytta Copernicus Data Spaceen).
+  const [minLon, minLat, maxLon, maxLat] = polygonGeoJson
+    ? geometryBounds(polygonGeoJson)
+    : bboxStr.split(",").map(Number);
+  const { resx, resy } = computeResxResy(minLat, maxLat);
+
   const bounds = polygonGeoJson
     ? { geometry: polygonGeoJson, properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } }
-    : (() => {
-        const [minLon, minLat, maxLon, maxLat] = bboxStr.split(",").map(Number);
-        return { bbox: [minLon, minLat, maxLon, maxLat], properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } };
-      })();
+    : { bbox: [minLon, minLat, maxLon, maxLat], properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } };
 
   const statsRequest = {
     input: {
@@ -660,8 +750,12 @@ async function computeNDCI(bboxStr, months, env, polygonGeoJson) {
       timeRange: { from, to },
       aggregationInterval: { of: `P${months * 30}D` },
       evalscript: NDCI_EVALSCRIPT,
-      width: 150,
-      height: 240
+      // KORJATTU 2026-09 (item 1, kayttajan mittaus): sampleCount oli 36000
+      // KAIKILLA rajauksilla (width/height kiinnitetty), joten Iisveden
+      // polygonissa pikselikoko oli ~130m - -40m rantapuskuri ei vaikuttanut
+      // mihinkaan yhden 130m-pikselin sisalla. resx/resy Sentinel-2:n omalla
+      // ~20m resoluutiolla (EPSG:4326-asteina, ks. RESOLUTION_M-kommentti).
+      resx, resy
     }
   };
 
@@ -682,12 +776,13 @@ async function computeNDCI(bboxStr, months, env, polygonGeoJson) {
   const stats = interval?.outputs?.data?.bands?.B0?.stats;
 
   if (!stats) {
-    return { error: "unexpected_response_shape", raw_response: data, time_range: { from, to } };
+    return { error: "unexpected_response_shape", raw_response: data, time_range: { from, to }, resolution_m: RESOLUTION_M };
   }
 
   return {
     time_range: { from, to },
     max_cloud_coverage_pct: 40,
+    resolution_m: RESOLUTION_M,
     ndci_stats: stats,
     grade: "B - KOKEELLINEN (Mishra & Mishra 2012, merkitty kokeelliseksi Sentinel-2:lle virallisen dokumentaation mukaan)",
     masking: "Vain vesipikselit (SCL==6) - maapikselit maskattu pois",
@@ -852,8 +947,10 @@ async function runStatsForRange(evalscript, bboxStr, fromISO, toISO, env, maxClo
       timeRange: { from: fromISO, to: toISO },
       aggregationInterval: { of: `P${spanDays}D` }, // koko ikkuna yhtena valina - yksi piste per vuosi
       evalscript,
-      width: 150,
-      height: 240
+      // KORJATTU 2026-09 (item 1) - ks. computeMNDWI/computeNDCI: resx/resy
+      // Sentinel-2:n omalla ~20m resoluutiolla, ei kiinnitetty width/height.
+      // lake-timeseries kayttaa samoja evalscripteja, sama korjaus koskee.
+      ...computeResxResy(minLat, maxLat)
     }
   };
 
@@ -1359,6 +1456,8 @@ export default {
     try {
       if (path === "/status" || path === "") {
         return handleStatus();
+      } else if (path === "/version") {
+        return handleVersion();
       } else if (path === "/fragmentation") {
         return await handleFragmentation(url);
       } else if (path === "/ndvi") {
