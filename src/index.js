@@ -29,6 +29,15 @@ const DEFAULT_BBOX = "26.00,62.40,27.50,63.50"; // Rautalammin reitti pilottialu
 // nimenomaan mitata vesiala koko bbox:in yli.
 const IISVESI_BBOX = "26.695,62.666,27.051,63.004";
 
+// SYKE JarviWiki-jarvirekisteri 14.722.1.001, vahvistettu 2026-09-17:
+// Iisvesi+Virmasvesi+Rasvanki YHTEENSA 164.47 km^2 (eteläinen allas
+// Nokisenkosken alapuolella EI mukana - jos olisi, koko jarvi olisi
+// n. 181 km^2; polygonin rajaus vahvistettu oikeaksi tama vasten).
+// Tama on YLARAJA vesiosuuden vertailulle (sisaltaa kasvillisuuslahdet);
+// raw_area_km2 (156.9, IISVESI_MASK.properties) on ALARAJA (pysyva
+// avovesi). Ks. computeMNDWI().
+const IISVESI_AREA_KM2 = 164.47;
+
 const SYKE_WMS = "https://paikkatiedot.ymparisto.fi/geoserver/inspire_lc/wms";
 const LAYER = "LC.LandCoverSurfaces.2018";
 
@@ -418,19 +427,31 @@ async function computeMNDWI(bboxStr, months, env) {
   // manuaalisesti histogrammia, mean(0/1) == osuus suoraan.
   const waterFractionPct = waterStats ? Math.round(waterStats.mean * 1000) / 10 : null;
 
-  // Vertailuarvo Iisvesi-ryhmalle (kayttajan 2026-09-17 Sentinel-2-analyysi,
-  // raaka jarviala 156.9 km^2). bbox-pinta-ala arvioitu karkeasti astekoon
-  // ja keskileveysasteen kosinin kautta (EI tarkka projektio - riittava
-  // sanity-checkiin, ei mittaukseen). Lasketaan vain jos bbox on lahella
-  // IISVESI_BBOX:aa, muuten null (vertailu ei mielekas muualle).
-  let expectedWaterFractionPct = null;
+  // Vertailuvali Iisvesi-ryhmalle (kayttaja 2026-09-17, kaksi lahdetta):
+  // - IISVESI_AREA_KM2 (164.47 km^2, SYKE JarviWiki-jarvirekisteri
+  //   14.722.1.001) = koko jarvi (Iisvesi+Virmasvesi+Rasvanki, ETELAINEN
+  //   allas Nokisenkosken alapuolella EI mukana - vahvistettu rekisterin
+  //   omalla alalla, koko jarvi olisi n. 181 km^2 jos se olisi mukana).
+  //   Tama on YLARAJA, koska sisaltaa matalat kasvillisuuslahdet.
+  // - raw_area_km2 (156.9 km^2, oma Sentinel-2-NIR<0.05-maski) = pysyva
+  //   AVOVESI, ALARAJA - kasvillisuuslahdet (nostavat NIR-heijastusta)
+  //   jaavat pois. Ero rekisteriin (7.6 km^2 / 4.6%) selittyy talla +
+  //   464 km:n rantaviivan 10-20m:n reunakaistalla.
+  // MNDWI>0 laskee osan kasvillisuudesta vedeksi, joten havaitun
+  // water_fraction_pct:n odotetaan osuvan NAIDEN VALIIN - poikkeama
+  // jompaankumpaan suuntaan on signaali (kuivuus/kasvillisuus/kynnys),
+  // ei virhe sinansa. bbox-pinta-ala arvioitu karkeasti astekoon ja
+  // keskileveysasteen kosinin kautta (EI tarkka projektio - riittava
+  // sanity-checkiin). Lasketaan vain jos bbox on IISVESI_BBOX.
+  let expectedWaterFractionPctUpper = null, expectedWaterFractionPctLower = null;
   if (bboxStr === IISVESI_BBOX) {
     const lonSpan = maxLon - minLon, latSpan = maxLat - minLat;
     const midLatRad = ((minLat + maxLat) / 2) * Math.PI / 180;
     const kmPerLonDeg = 111.32 * Math.cos(midLatRad);
     const bboxAreaKm2 = (lonSpan * kmPerLonDeg) * (latSpan * 111.32);
     const rawAreaKm2 = IISVESI_MASK.features[0].properties.raw_area_km2;
-    expectedWaterFractionPct = Math.round((rawAreaKm2 / bboxAreaKm2) * 1000) / 10;
+    expectedWaterFractionPctUpper = Math.round((IISVESI_AREA_KM2 / bboxAreaKm2) * 1000) / 10;
+    expectedWaterFractionPctLower = Math.round((rawAreaKm2 / bboxAreaKm2) * 1000) / 10;
   }
 
   return {
@@ -439,15 +460,16 @@ async function computeMNDWI(bboxStr, months, env) {
     mndwi_stats: stats,
     water_fraction_pct: waterFractionPct,
     water_threshold: MNDWI_WATER_THRESHOLD,
-    expected_water_fraction_pct: expectedWaterFractionPct,
+    expected_water_fraction_pct_lower: expectedWaterFractionPctLower,
+    expected_water_fraction_pct_upper: expectedWaterFractionPctUpper,
     grade: "A - vakiintunut (Xu 2006)",
     source: "Sentinel Hub Statistical API (Copernicus Data Space Ecosystem), Sentinel-2 L2A",
     caveat_water_fraction: waterFractionPct == null
       ? "water-kaistan tilastoa ei palautunut - tarkista raaka vastaus"
       : `Kynnys MNDWI>${MNDWI_WATER_THRESHOLD} (Xu 2006 -oletus), EI kalibroitu taman jarven omaa dataa vastaan. EI VIELA live-testattu.`,
-    caveat_expected_water_fraction: expectedWaterFractionPct == null
+    caveat_expected_water_fraction: expectedWaterFractionPctUpper == null
       ? undefined
-      : "expected_water_fraction_pct on KARKEA arvio (raaka jarviala 156.9 km^2 / bbox-pinta-ala, pallomainen approksimaatio) - ei tarkka projektio. Kaytetaan vain sanity-checkina water_fraction_pct:lle, ei totuutena."
+      : "vertailuvali [lower, upper] = [pysyva avovesi 156.9 km^2, SYKE-jarvirekisteri 164.47 km^2] / bbox-ala. Havaitun water_fraction_pct:n odotetaan osuvan valiin (MNDWI>0 sisaltaa osan kasvillisuuslahdista) - poikkeama on signaali, ei automaattisesti virhe."
   };
 }
 
