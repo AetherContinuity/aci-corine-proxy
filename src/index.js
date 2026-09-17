@@ -241,7 +241,7 @@ function handleStatus() {
       "/ndvi-image": "Sentinel Hub Process API — renderoitu NDVI-kuva (vihrea-keltainen-punainen) · ?bbox=...&months=3&w=480&h=350",
       "/mndwi": "BEM-E (Aquatic Extension) — MNDWI-tilasto [A-luokka] · ?bbox=...&months=3 · EI VIELA live-testattu",
       "/mndwi-image": "BEM-E — renderoitu MNDWI-kuva (ruskea-vihrea-sininen) · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
-      "/ndci": "BEM-E — NDCI-tilasto [B-luokka, KOKEELLINEN] · ?bbox=...&months=3 · vain vesipikselit (SCL==6) · EI VIELA live-testattu",
+      "/ndci": "BEM-E — NDCI-tilasto [B-luokka, KOKEELLINEN] · ?bbox=...&months=3 TAI ?polygon=<GeoJSON>&months=3 (rantaviivasta 30-60m sisaanpain puskuroitu polygoni = shoreline-eroosio ilman Process API:a) · vain vesipikselit (SCL==6) · EI VIELA live-testattu",
       "/ndci-image": "BEM-E — renderoitu NDCI-kuva (sininen-vihrea-keltainen-punainen) [B-luokka] · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
       "/lake-timeseries": "BEM-E — takautuva kesakauden (touko-syyskuu) MNDWI+NDCI-aikasarja · ?bbox=...&startYear=2018&endYear=2025&indices=mndwi,ndci · EI VIELA live-testattu · yksi API-kutsu per vuosi per indeksi · HUOM: startYear<2018 EI TUETTU, L2A ei systemaattista Euroopassa ennen 2017-05",
       "/catalog-check": "Diagnostiikka - STAC Catalog API -haku, tarkistaa onko Sentinel-2 L2A -skeneja olemassa JA Sen2Cor processing_baseline -yhtenaisyys (SCL-vesiluokan vertailukelpoisuus) · ?bbox=...&from=...&to=... (ISO 8601)",
@@ -535,24 +535,19 @@ async function handleMNDWIImage(url, env) {
 // pikselit (SCL==6 = KEEP, kaanteinen logiikka NDVI_EVALSCRIPT:iin
 // verrattuna, joka maskasi veden POIS).
 //
-// EI TOTEUTETTU (BEM-E item 5b, tarkistettava jatkossa): vesimaskia
-// pitaisi kaventaa rannoilta 2-3 pikselilla, koska SCL==6-luokka ei
-// erottele reunapikseleita, jotka ovat sekamittauksia (mixed pixel) veden
-// ja rannan valilta ja voivat vaaristaa NDCI-keskiarvoa. TAMA VAATISI
-// arkkitehtuurimuutoksen: Statistical API (kayton nykyinen kaava, tama
-// tiedosto) ei anna Workerille pikselikohtaista naapurustotietoa
-// evaluatePixel()-funktiossa - eroosio ei ole mahdollinen puhtaana
-// per-pikseli-evalscriptina. Toteutus vaatisi Process API:n (raakadata-
-// rasteri, esim. image/tiff FLOAT32 SCL-kaistalle), eroosion Workerissa
-// (esim. 5x5-ikkuna: pikseli sailyy vetena vain jos KAIKKI naapurit
-// sailla 2px ovat myos SCL==6) ja NDCI-keskiarvon laskun manuaalisesti
-// eroosioidun maskin yli. Ei toteutettu tassa, koska: (1) tama on eri
-// arkkitehtuuri kuin kaikki muut BEM-E-reitit (Process API vs.
-// Statistical API), (2) rasterin jasennysta Workerissa ei voitu
-// live-testata tasta ymparistosta (ei verkkoyhteytta Copernicus Data
-// Space -rajapintaan), joten vaarin kirjoitettu binaarijasennin voisi
-// hiljaa palauttaa vaaraa dataa tuotannossa. Testaa erikseen ennen
-// toteutusta.
+// BEM-E item 5b (KORJATTU 2026-09-17, kayttajan ohje 7): vesimaskin
+// kaventaminen rannoilta EI vaadi Process API:a eika rasterin eroosiota
+// Workerissa - aiempi paatelma (ks. git-historia) oli vaarin. Statistical
+// API:n input.bounds hyvaksyy bbox:in TILALLA geometry:n (GeoJSON), joten
+// jarven rantaviivasta 30-60m sisaanpain puskuroitu polygoni rajaa
+// aggregoinnin pois reunan sekapikseleista - sama vaikutus kuin eroosio,
+// ilman pikselikasittelya. Katso computeNDCI(...,polygonGeoJson) ja
+// handleNDCI:n ?polygon=-parametri. Polygonin GEOMETRIA ITSE EI sisally
+// tahan koodiin - se pitaa laskea kertaalleen offline (esim. Turf.js
+// bufferilla jarven rantaviiva-aineistosta, esim. OSM tai SYKE:n
+// vesistoaluerajat) ja antaa kutsussa. EI VIELA live-testattu (ei
+// verkkoyhteytta Copernicus Data Spaceen tasta ymparistosta) - testaa
+// oikealla polygonilla ennen tuotantokayttoa.
 const NDCI_EVALSCRIPT = `
 //VERSION=3
 function setup() {
@@ -575,22 +570,34 @@ function evaluatePixel(samples) {
 }
 `;
 
-async function computeNDCI(bboxStr, months, env) {
+async function computeNDCI(bboxStr, months, env, polygonGeoJson) {
   if (!env.COPERNICUS_CLIENT_ID || !env.COPERNICUS_CLIENT_SECRET) {
     throw new Error("COPERNICUS_CLIENT_ID / COPERNICUS_CLIENT_SECRET not configured (wrangler secret put ...)");
   }
-  const [minLon, minLat, maxLon, maxLat] = bboxStr.split(",").map(Number);
   const now = new Date();
   const to = now.toISOString();
   const from = new Date(now.getTime() - months * 30 * 24 * 3600 * 1000).toISOString();
   const token = await getCopernicusToken(env);
 
+  // BEM-E item 5b (kayttajan ohje 7, 2026-09-17): eroosiota EI tarvita
+  // Process API:n kautta - Statistical API:n input.bounds hyvaksyy
+  // bbox:in TILALLA geometry:n (GeoJSON-polygoni). Jarven rantaviivaa
+  // 30-60m sisaanpain puskuroitu polygoni tekee saman kuin pikselitason
+  // eroosio, mutta ilman rasterikasittelya Workerissa. Polygoni EI
+  // sisally tahan koodiin - se pitaa laskea kertaalleen offline (esim.
+  // Turf.js/QGIS jarven rantaviiva-aineistosta) ja antaa ?polygon=
+  // -parametrina. EI VIELA testattu (ei polygonia saatavilla tata
+  // kirjoittaessa, eika verkkoyhteytta Copernicus Data Spaceen).
+  const bounds = polygonGeoJson
+    ? { geometry: polygonGeoJson, properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } }
+    : (() => {
+        const [minLon, minLat, maxLon, maxLat] = bboxStr.split(",").map(Number);
+        return { bbox: [minLon, minLat, maxLon, maxLat], properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } };
+      })();
+
   const statsRequest = {
     input: {
-      bounds: {
-        bbox: [minLon, minLat, maxLon, maxLat],
-        properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" }
-      },
+      bounds,
       data: [
         { type: "sentinel-2-l2a", dataFilter: { maxCloudCoverage: 40, mosaickingOrder: "leastCC" } }
       ]
@@ -636,19 +643,33 @@ async function computeNDCI(bboxStr, months, env) {
 
 async function handleNDCI(url, env) {
   const bboxStr = url.searchParams.get("bbox");
+  const polygonStr = url.searchParams.get("polygon");
   const months = Math.max(1, Math.min(12, parseInt(url.searchParams.get("months") || "3", 10)));
-  if (!bboxStr) {
-    return json({ error: "bbox-parametri on pakollinen (esim. Iisvesi: 26.167,62.567,27.067,63.467)" }, 400);
+  if (!bboxStr && !polygonStr) {
+    return json({ error: "bbox- tai polygon-parametri on pakollinen (esim. Iisvesi bbox: 26.167,62.567,27.067,63.467)" }, 400);
+  }
+
+  let polygonGeoJson = null;
+  if (polygonStr) {
+    try {
+      polygonGeoJson = JSON.parse(polygonStr);
+    } catch (e) {
+      return json({ error: `polygon ei ole kelvollista GeoJSON:ia: ${e.message}` }, 400);
+    }
   }
 
   try {
-    const result = await computeNDCI(bboxStr, months, env);
+    const result = await computeNDCI(bboxStr, months, env, polygonGeoJson);
     return json({
       bem_e_component: "NDCI (Aquatic Extension, B-luokka - KOKEELLINEN)",
       method: "sentinel_hub_statistical_api",
-      bbox: bboxStr,
+      bbox: polygonGeoJson ? null : bboxStr,
+      used_polygon: !!polygonGeoJson,
+      shoreline_erosion: polygonGeoJson
+        ? "Kaytetty ?polygon= -geometriaa bbox:in sijaan - jos polygoni on puskuroitu rantaviivasta sisaanpain, tama vastaa vesimaskin kaventamista (item 5b) ilman rasterikasittelya."
+        : "EI kaytetty - bbox sisaltaa koko rantaviivan, ei eroosiota (ks. item 5b -kommentti computeNDCI:n yla puolella).",
       ...result,
-      caveat: "EI VIELA live-testattu tallle nimenomaiselle bbox:ille (kirjoitettu 2026-07-26). Cloud-aggregoitu tilasto VAIN vesipikseleilta (SCL==6). Jos vesipikseleita on vahan (esim. paljon pilvia tai pieni bbox), sampleCount voi olla pieni ja tulos epaluotettava - tarkista aina sampleCount."
+      caveat: "EI VIELA live-testattu tallle nimenomaiselle bbox:ille/polygonille (kirjoitettu 2026-07-26, polygon-tuki lisatty 2026-09-17). Cloud-aggregoitu tilasto VAIN vesipikseleilta (SCL==6). Jos vesipikseleita on vahan (esim. paljon pilvia tai pieni alue), sampleCount voi olla pieni ja tulos epaluotettava - tarkista aina sampleCount."
     });
   } catch (e) {
     return json({ error: e.message, step: "ndci" }, 502);
