@@ -244,7 +244,7 @@ function handleStatus() {
       "/ndci": "BEM-E — NDCI-tilasto [B-luokka, KOKEELLINEN] · ?bbox=...&months=3 · vain vesipikselit (SCL==6) · EI VIELA live-testattu",
       "/ndci-image": "BEM-E — renderoitu NDCI-kuva (sininen-vihrea-keltainen-punainen) [B-luokka] · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
       "/lake-timeseries": "BEM-E — takautuva kesakauden (touko-syyskuu) MNDWI+NDCI-aikasarja · ?bbox=...&startYear=2018&endYear=2025&indices=mndwi,ndci · EI VIELA live-testattu · yksi API-kutsu per vuosi per indeksi · HUOM: startYear<2018 EI TUETTU, L2A ei systemaattista Euroopassa ennen 2017-05",
-      "/catalog-check": "Diagnostiikka - STAC Catalog API -haku, tarkistaa onko Sentinel-2 L2A -skeneja olemassa · ?bbox=...&from=...&to=... (ISO 8601)",
+      "/catalog-check": "Diagnostiikka - STAC Catalog API -haku, tarkistaa onko Sentinel-2 L2A -skeneja olemassa JA Sen2Cor processing_baseline -yhtenaisyys (SCL-vesiluokan vertailukelpoisuus) · ?bbox=...&from=...&to=... (ISO 8601)",
       "/combined": "CORINE + NDVI rinnakkain, ristiintarkistus, yhdistetty D_f · ?bbox=...&grid=6&months=3",
       "/recovery": "Grid-sampled SYKE protected-area R proxy · ?bbox=...&grid=7 (n x n points, max 7x7)"
     },
@@ -318,6 +318,12 @@ function evaluatePixel(samples) {
 // vesi maasta - EI siis maskata vetta pois (SCL==6-suodatinta EI
 // kayteta tassa), koko bbox:in yli laskettu keskiarvo/hajonta kuvaa
 // "kuinka paljon vetta suhteessa maahan" -tason muutosta ajassa.
+// Kiintea kynnys vesi/maa-luokitukseen. Xu 2006 -oletus on 0 (MNDWI>0 =
+// vesi). HUOM: turbidilla/humuspitoisella jarvella kynnys voi vaatia
+// kalibrointia paikallisesti - 0 on lahtokohta, ei validoitu Iisveden/
+// Rautalammin reitin omaa dataa vastaan (ei live-testattu, ks. caveat).
+const MNDWI_WATER_THRESHOLD = 0;
+
 const MNDWI_EVALSCRIPT = `
 //VERSION=3
 function setup() {
@@ -325,6 +331,7 @@ function setup() {
     input: [{ bands: ["B03", "B11", "dataMask"] }],
     output: [
       { id: "data", bands: 1 },
+      { id: "water", bands: 1 },
       { id: "dataMask", bands: 1 }
     ]
   };
@@ -332,8 +339,10 @@ function setup() {
 function evaluatePixel(samples) {
   let mndwi = (samples.B03 - samples.B11) / (samples.B03 + samples.B11);
   let valid = (samples.B03 + samples.B11 == 0) ? 0 : 1;
+  let water = (mndwi > ${MNDWI_WATER_THRESHOLD}) ? 1 : 0;
   return {
     data: [mndwi],
+    water: [water],
     dataMask: [samples.dataMask * valid]
   };
 }
@@ -385,17 +394,28 @@ async function computeMNDWI(bboxStr, months, env) {
   const data = await r.json();
   const interval = data?.data?.[0];
   const stats = interval?.outputs?.data?.bands?.B0?.stats;
+  const waterStats = interval?.outputs?.water?.bands?.B0?.stats;
 
   if (!stats) {
     return { error: "unexpected_response_shape", raw_response: data, time_range: { from, to } };
   }
 
+  // vesipikselien osuus = binaarisen water-kaistan (mndwi>kynnys ? 1 : 0)
+  // keskiarvo Statistical API:n omalta tilastolta - ei tarvitse laskea
+  // manuaalisesti histogrammia, mean(0/1) == osuus suoraan.
+  const waterFractionPct = waterStats ? Math.round(waterStats.mean * 1000) / 10 : null;
+
   return {
     time_range: { from, to },
     max_cloud_coverage_pct: 40,
     mndwi_stats: stats,
+    water_fraction_pct: waterFractionPct,
+    water_threshold: MNDWI_WATER_THRESHOLD,
     grade: "A - vakiintunut (Xu 2006)",
-    source: "Sentinel Hub Statistical API (Copernicus Data Space Ecosystem), Sentinel-2 L2A"
+    source: "Sentinel Hub Statistical API (Copernicus Data Space Ecosystem), Sentinel-2 L2A",
+    caveat_water_fraction: waterFractionPct == null
+      ? "water-kaistan tilastoa ei palautunut - tarkista raaka vastaus"
+      : `Kynnys MNDWI>${MNDWI_WATER_THRESHOLD} (Xu 2006 -oletus), EI kalibroitu taman jarven omaa dataa vastaan. EI VIELA live-testattu.`
   };
 }
 
@@ -514,6 +534,25 @@ async function handleMNDWIImage(url, env) {
 // SISALLA, ei erottaa vetta maasta - siksi tama MASKAA POIS ei-vesi-
 // pikselit (SCL==6 = KEEP, kaanteinen logiikka NDVI_EVALSCRIPT:iin
 // verrattuna, joka maskasi veden POIS).
+//
+// EI TOTEUTETTU (BEM-E item 5b, tarkistettava jatkossa): vesimaskia
+// pitaisi kaventaa rannoilta 2-3 pikselilla, koska SCL==6-luokka ei
+// erottele reunapikseleita, jotka ovat sekamittauksia (mixed pixel) veden
+// ja rannan valilta ja voivat vaaristaa NDCI-keskiarvoa. TAMA VAATISI
+// arkkitehtuurimuutoksen: Statistical API (kayton nykyinen kaava, tama
+// tiedosto) ei anna Workerille pikselikohtaista naapurustotietoa
+// evaluatePixel()-funktiossa - eroosio ei ole mahdollinen puhtaana
+// per-pikseli-evalscriptina. Toteutus vaatisi Process API:n (raakadata-
+// rasteri, esim. image/tiff FLOAT32 SCL-kaistalle), eroosion Workerissa
+// (esim. 5x5-ikkuna: pikseli sailyy vetena vain jos KAIKKI naapurit
+// sailla 2px ovat myos SCL==6) ja NDCI-keskiarvon laskun manuaalisesti
+// eroosioidun maskin yli. Ei toteutettu tassa, koska: (1) tama on eri
+// arkkitehtuuri kuin kaikki muut BEM-E-reitit (Process API vs.
+// Statistical API), (2) rasterin jasennysta Workerissa ei voitu
+// live-testata tasta ymparistosta (ei verkkoyhteytta Copernicus Data
+// Space -rajapintaan), joten vaarin kirjoitettu binaarijasennin voisi
+// hiljaa palauttaa vaaraa dataa tuotannossa. Testaa erikseen ennen
+// toteutusta.
 const NDCI_EVALSCRIPT = `
 //VERSION=3
 function setup() {
@@ -804,8 +843,15 @@ async function handleCatalogCheck(url, env) {
     const scenes = features.map(f => ({
       datetime: f.properties?.datetime,
       cloudCover: f.properties?.["eo:cloud_cover"],
+      processingBaseline: f.properties?.["s2:processing_baseline"] ?? null,
       id: f.id
     }));
+
+    // Sen2Cor-versioyhtenaisyys (BEM-E item 5c): SCL-vesiluokan (SCL==6)
+    // raja-arvot ovat muuttuneet Sen2Cor-versioiden valilla, joten MNDWI/
+    // NDCI-aikasarjaa ei pitaisi verrata suoraan yli baseline-rajan
+    // varmistamatta etta samaa luokittelulogiikkaa on kaytetty.
+    const baselines = [...new Set(scenes.map(s => s.processingBaseline).filter(b => b != null))];
 
     return json({
       bem_e_component: "Catalog API -tarkistus (STAC search) - diagnostiikka",
@@ -814,7 +860,12 @@ async function handleCatalogCheck(url, env) {
       scene_count: scenes.length,
       context: data.context,
       scenes,
-      caveat: "Tama tarkistaa ONKO skeneja olemassa - EI kerro suoraan miksi Statistical API palautti data:[], mutta antaa riippumattoman vahvistuksen datan olemassaolosta."
+      processing_baselines_present: baselines,
+      processing_baseline_consistent: baselines.length <= 1,
+      caveat: "Tama tarkistaa ONKO skeneja olemassa - EI kerro suoraan miksi Statistical API palautti data:[], mutta antaa riippumattoman vahvistuksen datan olemassaolosta.",
+      caveat_baseline: baselines.length > 1
+        ? `USEITA Sen2Cor-processing_baseline-versioita samassa aikavalissa (${baselines.join(', ')}) - SCL-vesiluokka (SCL==6) ei valttamatta vertailukelpoinen naiden skenejen valilla, MNDWI/NDCI-aikasarjan tulkinnassa huomioitava. EI VIELA live-testattu, s2:processing_baseline-kentan nimi ei vahvistettu taman STAC-endpointin oikeaa vastausta vasten.`
+        : "Ei havaittu useita baseline-versioita tassa haussa (tai kentta puuttuu vastauksesta - EI VIELA vahvistettu)."
     });
   } catch (e) {
     return json({ error: e.message, step: "catalog-check" }, 502);
