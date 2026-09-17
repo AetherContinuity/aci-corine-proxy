@@ -8,6 +8,8 @@
 // vaatisi täyden raster/vektori-topologia-käsittelyn (GeoPandas/Rasterio-tasoinen
 // putki, kuvattu TN-015:n arkkitehtuuriosiossa, "Pre-development"-tilassa).
 
+import IISVESI_MASK from "./iisvesi_ndci_mask.json";
+
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, OPTIONS",
@@ -15,6 +17,17 @@ const CORS = {
 };
 
 const DEFAULT_BBOX = "26.00,62.40,27.50,63.50"; // Rautalammin reitti pilottialue
+
+// Iisvesi-Virmasvesi-Rasvanki -jarviryhma (BEM-E §09). Kayttajan
+// 2026-09-17 Sentinel-2-analyysi (NIR<0.05 kolmella pilvettomalla kuvalla,
+// 20 m, laatat 35VMK+35VNK): raaka jarviala 156.9 km^2, bbox 26.695,62.666,
+// 27.051,63.004 - KORVAA aiemmat kaksi arvattua bbox-esimerkkia (jotka
+// kumpikaan eivat osuneet oikein: toinen leikkasi pohjoisosan, toinen oli
+// 2x liian laaja pohjois-etela). IISVESI_MASK-polygoni (-40 m rantapuskuri,
+// 137.4 km^2, 8 osaa, 3089 kärkea, EPSG:4326) kaytetaan NDCI:n shoreline-
+// eroosioon (item 5b) - EI kaytetty MNDWI:lle, jonka tarkoitus on
+// nimenomaan mitata vesiala koko bbox:in yli.
+const IISVESI_BBOX = "26.695,62.666,27.051,63.004";
 
 const SYKE_WMS = "https://paikkatiedot.ymparisto.fi/geoserver/inspire_lc/wms";
 const LAYER = "LC.LandCoverSurfaces.2018";
@@ -239,9 +252,9 @@ function handleStatus() {
       "/fragmentation": "Grid-sampled CORINE D_f proxy · ?bbox=...&grid=7 (n x n points, max 7x7)",
       "/ndvi": "Sentinel Hub Statistical API — NDVI mean/stDev over bbox · ?bbox=...&months=3",
       "/ndvi-image": "Sentinel Hub Process API — renderoitu NDVI-kuva (vihrea-keltainen-punainen) · ?bbox=...&months=3&w=480&h=350",
-      "/mndwi": "BEM-E (Aquatic Extension) — MNDWI-tilasto [A-luokka] · ?bbox=...&months=3 · EI VIELA live-testattu",
+      "/mndwi": "BEM-E (Aquatic Extension) — MNDWI-tilasto [A-luokka] · ?bbox=26.695,62.666,27.051,63.004&months=3 (Iisvesi-ryhma, vahvistettu 2026-09-17) · palauttaa myos expected_water_fraction_pct-vertailuarvon Iisvedelle · EI VIELA live-testattu",
       "/mndwi-image": "BEM-E — renderoitu MNDWI-kuva (ruskea-vihrea-sininen) · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
-      "/ndci": "BEM-E — NDCI-tilasto [B-luokka, KOKEELLINEN] · ?bbox=...&months=3 TAI ?polygon=<GeoJSON>&months=3 (rantaviivasta 30-60m sisaanpain puskuroitu polygoni = shoreline-eroosio ilman Process API:a) · vain vesipikselit (SCL==6) · EI VIELA live-testattu",
+      "/ndci": "BEM-E — NDCI-tilasto [B-luokka, KOKEELLINEN] · ?bbox=...&months=3 TAI ?polygon=iisvesi (sisainen, -40m rantapuskuroitu maski, 137.4 km^2) TAI ?polygon=<oma GeoJSON>&months=3 · vain vesipikselit (SCL==6) · EI VIELA live-testattu",
       "/ndci-image": "BEM-E — renderoitu NDCI-kuva (sininen-vihrea-keltainen-punainen) [B-luokka] · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
       "/lake-timeseries": "BEM-E — takautuva kesakauden (touko-syyskuu) MNDWI+NDCI-aikasarja · ?bbox=...&startYear=2018&endYear=2025&indices=mndwi,ndci · EI VIELA live-testattu · yksi API-kutsu per vuosi per indeksi · HUOM: startYear<2018 EI TUETTU, L2A ei systemaattista Euroopassa ennen 2017-05",
       "/catalog-check": "Diagnostiikka - STAC Catalog API -haku, tarkistaa onko Sentinel-2 L2A -skeneja olemassa JA Sen2Cor processing_baseline -yhtenaisyys (SCL-vesiluokan vertailukelpoisuus) · ?bbox=...&from=...&to=... (ISO 8601)",
@@ -405,17 +418,36 @@ async function computeMNDWI(bboxStr, months, env) {
   // manuaalisesti histogrammia, mean(0/1) == osuus suoraan.
   const waterFractionPct = waterStats ? Math.round(waterStats.mean * 1000) / 10 : null;
 
+  // Vertailuarvo Iisvesi-ryhmalle (kayttajan 2026-09-17 Sentinel-2-analyysi,
+  // raaka jarviala 156.9 km^2). bbox-pinta-ala arvioitu karkeasti astekoon
+  // ja keskileveysasteen kosinin kautta (EI tarkka projektio - riittava
+  // sanity-checkiin, ei mittaukseen). Lasketaan vain jos bbox on lahella
+  // IISVESI_BBOX:aa, muuten null (vertailu ei mielekas muualle).
+  let expectedWaterFractionPct = null;
+  if (bboxStr === IISVESI_BBOX) {
+    const lonSpan = maxLon - minLon, latSpan = maxLat - minLat;
+    const midLatRad = ((minLat + maxLat) / 2) * Math.PI / 180;
+    const kmPerLonDeg = 111.32 * Math.cos(midLatRad);
+    const bboxAreaKm2 = (lonSpan * kmPerLonDeg) * (latSpan * 111.32);
+    const rawAreaKm2 = IISVESI_MASK.features[0].properties.raw_area_km2;
+    expectedWaterFractionPct = Math.round((rawAreaKm2 / bboxAreaKm2) * 1000) / 10;
+  }
+
   return {
     time_range: { from, to },
     max_cloud_coverage_pct: 40,
     mndwi_stats: stats,
     water_fraction_pct: waterFractionPct,
     water_threshold: MNDWI_WATER_THRESHOLD,
+    expected_water_fraction_pct: expectedWaterFractionPct,
     grade: "A - vakiintunut (Xu 2006)",
     source: "Sentinel Hub Statistical API (Copernicus Data Space Ecosystem), Sentinel-2 L2A",
     caveat_water_fraction: waterFractionPct == null
       ? "water-kaistan tilastoa ei palautunut - tarkista raaka vastaus"
-      : `Kynnys MNDWI>${MNDWI_WATER_THRESHOLD} (Xu 2006 -oletus), EI kalibroitu taman jarven omaa dataa vastaan. EI VIELA live-testattu.`
+      : `Kynnys MNDWI>${MNDWI_WATER_THRESHOLD} (Xu 2006 -oletus), EI kalibroitu taman jarven omaa dataa vastaan. EI VIELA live-testattu.`,
+    caveat_expected_water_fraction: expectedWaterFractionPct == null
+      ? undefined
+      : "expected_water_fraction_pct on KARKEA arvio (raaka jarviala 156.9 km^2 / bbox-pinta-ala, pallomainen approksimaatio) - ei tarkka projektio. Kaytetaan vain sanity-checkina water_fraction_pct:lle, ei totuutena."
   };
 }
 
@@ -423,7 +455,7 @@ async function handleMNDWI(url, env) {
   const bboxStr = url.searchParams.get("bbox");
   const months = Math.max(1, Math.min(12, parseInt(url.searchParams.get("months") || "3", 10)));
   if (!bboxStr) {
-    return json({ error: "bbox-parametri on pakollinen (esim. Iisvesi: 26.667,62.567,27.067,62.967)" }, 400);
+    return json({ error: "bbox-parametri on pakollinen (esim. Iisvesi: 26.695,62.666,27.051,63.004)" }, 400);
   }
 
   try {
@@ -510,7 +542,7 @@ async function handleMNDWIImage(url, env) {
   const width  = Math.max(64, Math.min(640, parseInt(url.searchParams.get("w") || "480", 10)));
   const height = Math.max(64, Math.min(640, parseInt(url.searchParams.get("h") || "480", 10)));
   if (!bboxStr) {
-    return json({ error: "bbox-parametri on pakollinen (esim. Iisvesi: 26.667,62.567,27.067,62.967)" }, 400);
+    return json({ error: "bbox-parametri on pakollinen (esim. Iisvesi: 26.695,62.666,27.051,63.004)" }, 400);
   }
 
   try {
@@ -646,15 +678,22 @@ async function handleNDCI(url, env) {
   const polygonStr = url.searchParams.get("polygon");
   const months = Math.max(1, Math.min(12, parseInt(url.searchParams.get("months") || "3", 10)));
   if (!bboxStr && !polygonStr) {
-    return json({ error: "bbox- tai polygon-parametri on pakollinen (esim. Iisvesi bbox: 26.167,62.567,27.067,63.467)" }, 400);
+    return json({ error: "bbox- tai polygon-parametri on pakollinen (esim. Iisvesi bbox: 26.695,62.666,27.051,63.004)" }, 400);
   }
 
   let polygonGeoJson = null;
-  if (polygonStr) {
+  let polygonSource = null;
+  if (polygonStr === "iisvesi") {
+    // Valmiiksi laskettu -40m rantapuskuroitu maski (kayttajan Sentinel-2-
+    // analyysi 2026-09-17): 137.4 km^2, 8 osaa, 3089 karkea, EPSG:4326.
+    polygonGeoJson = IISVESI_MASK.features[0].geometry;
+    polygonSource = "iisvesi (sisainen, " + IISVESI_MASK.features[0].properties.area_km2 + " km^2)";
+  } else if (polygonStr) {
     try {
       polygonGeoJson = JSON.parse(polygonStr);
+      polygonSource = "custom";
     } catch (e) {
-      return json({ error: `polygon ei ole kelvollista GeoJSON:ia: ${e.message}` }, 400);
+      return json({ error: `polygon ei ole kelvollista GeoJSON:ia (eika avainsana "iisvesi"): ${e.message}` }, 400);
     }
   }
 
@@ -665,11 +704,15 @@ async function handleNDCI(url, env) {
       method: "sentinel_hub_statistical_api",
       bbox: polygonGeoJson ? null : bboxStr,
       used_polygon: !!polygonGeoJson,
+      polygon_source: polygonSource,
       shoreline_erosion: polygonGeoJson
         ? "Kaytetty ?polygon= -geometriaa bbox:in sijaan - jos polygoni on puskuroitu rantaviivasta sisaanpain, tama vastaa vesimaskin kaventamista (item 5b) ilman rasterikasittelya."
-        : "EI kaytetty - bbox sisaltaa koko rantaviivan, ei eroosiota (ks. item 5b -kommentti computeNDCI:n yla puolella).",
+        : "EI kaytetty - bbox sisaltaa koko rantaviivan, ei eroosiota (ks. item 5b -kommentti computeNDCI:n yla puolella). Kokeile ?polygon=iisvesi.",
       ...result,
-      caveat: "EI VIELA live-testattu tallle nimenomaiselle bbox:ille/polygonille (kirjoitettu 2026-07-26, polygon-tuki lisatty 2026-09-17). Cloud-aggregoitu tilasto VAIN vesipikseleilta (SCL==6). Jos vesipikseleita on vahan (esim. paljon pilvia tai pieni alue), sampleCount voi olla pieni ja tulos epaluotettava - tarkista aina sampleCount."
+      caveat: "EI VIELA live-testattu tallle nimenomaiselle bbox:ille/polygonille (kirjoitettu 2026-07-26, polygon-tuki lisatty 2026-09-17). Cloud-aggregoitu tilasto VAIN vesipikseleilta (SCL==6). Jos vesipikseleita on vahan (esim. paljon pilvia tai pieni alue), sampleCount voi olla pieni ja tulos epaluotettava - tarkista aina sampleCount.",
+      caveat_polygon_size: polygonGeoJson
+        ? "iisvesi-maski: 8 osaa, 3089 karkea (~127kB GeoJSON). Jos Statistics API hylkaa geometrian koon vuoksi (HTTP 400/413), yksinkertaista offline Python/shapely-simplify(tolerance=40, preserve_topology=True):lla ja korvaa src/iisvesi_ndci_mask.json - TATA EI voi tehda Workerissa (ei shapelya/geometriakirjastoa JS-runtimessa)."
+        : undefined,
     });
   } catch (e) {
     return json({ error: e.message, step: "ndci" }, 502);
@@ -749,7 +792,7 @@ async function handleNDCIImage(url, env) {
   const width  = Math.max(64, Math.min(640, parseInt(url.searchParams.get("w") || "480", 10)));
   const height = Math.max(64, Math.min(640, parseInt(url.searchParams.get("h") || "480", 10)));
   if (!bboxStr) {
-    return json({ error: "bbox-parametri on pakollinen (esim. Iisvesi: 26.167,62.567,27.067,63.467)" }, 400);
+    return json({ error: "bbox-parametri on pakollinen (esim. Iisvesi: 26.695,62.666,27.051,63.004)" }, 400);
   }
 
   try {
@@ -900,7 +943,7 @@ async function handleCatalogCheck(url, env) {
 async function handleLakeTimeseries(url, env) {
   const bboxStr = url.searchParams.get("bbox");
   if (!bboxStr) {
-    return json({ error: "bbox-parametri on pakollinen (esim. Iisvesi: 26.167,62.567,27.067,63.467)" }, 400);
+    return json({ error: "bbox-parametri on pakollinen (esim. Iisvesi: 26.695,62.666,27.051,63.004)" }, 400);
   }
   // KORJATTU 2026-07-27 (loydetty live-testissa): startYear=2016 palautti
   // "data":[] KAIKILLE vuoden 2016 kutsuille. Syy varmistettu virallisesta
