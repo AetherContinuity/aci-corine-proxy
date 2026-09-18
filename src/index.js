@@ -18,7 +18,7 @@ const CORS = {
 };
 
 // Bumpataan jokaisella BEM-E-korjauskierroksella - /version-reitti (item 4).
-const PROXY_VERSION = "0.7-ndvi-adaptive-resolution";
+const PROXY_VERSION = "0.8-lastintervalbehavior-fix";
 
 const DEFAULT_BBOX = "26.00,62.40,27.50,63.50"; // Rautalammin reitti pilottialue
 
@@ -316,7 +316,7 @@ function handleVersion() {
   return json({
     proxy: "aci-corine-proxy",
     version: PROXY_VERSION,
-    changelog_latest: "2026-09-17: resx/resy-resoluutiokorjaus MNDWI/NDCI/NDVI/lake-timeseries:iin (adaptiivinen, max 250000px/kutsu), MNDWI-pilvimaski, oikea Iisvesi-bbox+polygonit (?polygon=iisvesi_raw), lake-timeseries tukee polygonia + mndwi_water_fraction_pct_median-kalibrointia, /version-reitti. NDVI:n stDev ennen v0.6 EI vertailukelpoinen (oli ~500m/px).",
+    changelog_latest: "2026-09-18: aggregationInterval.lastIntervalBehavior='SHORTEN' kaikkiin nelja Statistical API -kutsuun + runStatsForRange:n spanDays Math.ceil (ei Math.round) + lake-timeseries:n oletusvali puoliavoimeksi (10-01T00:00:00Z) - korjaa /lake-timeseries:n tyhjan vastauksen (kesaikkuna oli 152.99pv, pyoristys+API:n oletus-DROP pudotti ainoan aikavalin). Aiemmat 2026-09-17: resx/resy-resoluutiokorjaus MNDWI/NDCI/NDVI/lake-timeseries:iin (adaptiivinen, max 250000px/kutsu), MNDWI-pilvimaski, oikea Iisvesi-bbox+polygonit (?polygon=iisvesi_raw), lake-timeseries tukee polygonia + mndwi_water_fraction_pct_median-kalibrointia, /version-reitti. NDVI:n stDev ennen v0.6 EI vertailukelpoinen (oli ~500m/px).",
     deployed_check: new Date().toISOString()
   });
 }
@@ -504,7 +504,7 @@ async function computeMNDWI(bboxStr, months, env, polygonGeoJson) {
     },
     aggregation: {
       timeRange: { from, to },
-      aggregationInterval: { of: `P${months * 30}D` },
+      aggregationInterval: { of: `P${months * 30}D`, lastIntervalBehavior: "SHORTEN" },
       evalscript: MNDWI_EVALSCRIPT,
       // KORJATTU 2026-09 (item 1, kayttajan mittaus: sampleCount oli
       // kiinteasti 36000 riippumatta rajauksen koosta, koska tassa oli
@@ -777,7 +777,7 @@ async function computeNDCI(bboxStr, months, env, polygonGeoJson) {
     },
     aggregation: {
       timeRange: { from, to },
-      aggregationInterval: { of: `P${months * 30}D` },
+      aggregationInterval: { of: `P${months * 30}D`, lastIntervalBehavior: "SHORTEN" },
       evalscript: NDCI_EVALSCRIPT,
       // KORJATTU 2026-09 (item 1, kayttajan mittaus): sampleCount oli 36000
       // KAIKILLA rajauksilla (width/height kiinnitetty), joten Iisveden
@@ -966,7 +966,17 @@ async function runStatsForRange(evalscript, bboxStr, fromISO, toISO, env, maxClo
   const resolutionM = adaptiveResolutionM(minLon, minLat, maxLon, maxLat);
   const { resx, resy } = computeResxResy(minLat, maxLat, resolutionM);
   const token = await getCopernicusToken(env);
-  const spanDays = Math.max(1, Math.round((new Date(toISO) - new Date(fromISO)) / 86400000));
+  // KORJATTU 2026-09-18 (kayttajan loydos): kesaikkuna 05-01..09-30T23:59:59Z
+  // on 152.99 paivaa, ei 153 - Math.round pyoristi ylospain JA
+  // aggregationInterval:n P153D ylitti timeRange:n TODELLISEN pituuden
+  // sekunnilla. Statistical API pudottaa vajaan/ylimenevan viimeisen
+  // valin oletuksena pois (lastIntervalBehavior on oletuksena "DROP" -
+  // varmistettu kayttajan omalla live-testilla, ei dokumentaatiosta),
+  // jolloin AINOA aikavali koko kutsulle poistui - vastaus oli tyhja
+  // KAIKILLE kahdeksalle vuodelle ilman virhetta. Math.ceil varmistaa etta
+  // P{spanDays}D on AINA >= timeRange:n todellinen pituus (SHORTEN-korjaus
+  // alla kattaa jos of jaa liian pitkaksi, ei liian lyhyeksi).
+  const spanDays = Math.max(1, Math.ceil((new Date(toISO) - new Date(fromISO)) / 86400000));
 
   const bounds = polygonGeoJson
     ? { geometry: polygonGeoJson, properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } }
@@ -979,7 +989,7 @@ async function runStatsForRange(evalscript, bboxStr, fromISO, toISO, env, maxClo
     },
     aggregation: {
       timeRange: { from: fromISO, to: toISO },
-      aggregationInterval: { of: `P${spanDays}D` }, // koko ikkuna yhtena valina - yksi piste per vuosi
+      aggregationInterval: { of: `P${spanDays}D`, lastIntervalBehavior: "SHORTEN" }, // koko ikkuna yhtena valina - yksi piste per vuosi
       evalscript,
       // KORJATTU 2026-09 (item 1) - ks. computeMNDWI/computeNDCI: resx/resy
       // adaptiivisella resoluutiolla, ei kiinnitetty width/height.
@@ -1181,7 +1191,15 @@ async function handleLakeTimeseries(url, env) {
     // tassakin - varmistaa TASMALLEEN saman merkkijonomuodon kuin toimiva
     // koodipolku, ei vain samaa PAIVAMAARAA eri muodossa.
     const from = new Date(debugStartDay ? `${year}-${debugStartDay}T00:00:00Z` : `${year}-05-01T00:00:00Z`).toISOString();
-    const to = new Date(debugEndDay ? `${year}-${debugEndDay}T23:59:59Z` : `${year}-09-30T23:59:59Z`).toISOString();
+    // KORJATTU 2026-09-18 (kayttajan loydos): oletusvali oli 05-01T00:00:00Z
+    // .. 09-30T23:59:59Z = 152.99 paivaa, ei tasan 153 - spanDays pyoristyi
+    // ylospain (Math.round) ja aggregationInterval:n P153D ylitti timeRange:n
+    // todellisen pituuden sekunnilla, jolloin Statistical API pudotti
+    // vajaan/ylimenevan AINOAN valin ja vastaus oli tyhja kaikilta vuosilta.
+    // Puoliavoin vali [1.5. 00:00Z, 1.10. 00:00Z) on TASAN 153 paivaa -
+    // ei enaa millisekuntipyoristysta. debugEndDay-ohitus jatetaan ennalleen
+    // (diagnostiikkaparametri, kutsuja hallitsee tarkan arvon itse).
+    const to = new Date(debugEndDay ? `${year}-${debugEndDay}T23:59:59Z` : `${year}-10-01T00:00:00Z`).toISOString();
     const row = { year, summer_window: { from, to } };
 
     if (indicesParam.includes("mndwi")) {
@@ -1290,7 +1308,7 @@ async function computeNDVI(bboxStr, months, env) {
     },
     aggregation: {
       timeRange: { from, to },
-      aggregationInterval: { of: `P${months * 30}D` },
+      aggregationInterval: { of: `P${months * 30}D`, lastIntervalBehavior: "SHORTEN" },
       evalscript: NDVI_EVALSCRIPT,
       resx, resy
     }
