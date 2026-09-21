@@ -18,7 +18,7 @@ const CORS = {
 };
 
 // Bumpataan jokaisella BEM-E-korjauskierroksella - /version-reitti (item 4).
-const PROXY_VERSION = "0.9.1-units-per-band";
+const PROXY_VERSION = "0.9.2-default-units";
 
 const DEFAULT_BBOX = "26.00,62.40,27.50,63.50"; // Rautalammin reitti pilottialue
 
@@ -409,7 +409,7 @@ function handleVersion() {
   return json({
     proxy: "aci-corine-proxy",
     version: PROXY_VERSION,
-    changelog_latest: "2026-09-21 (0.9.1): units:REFLECTANCE koski koko input-lohkoa myos SCL:aa, jota Sentinel Hub tukee vain DN-yksikkona - kaikki 16 /lake-timeseries-kutsua palauttivat HTTP 400 (Invalid script! Band SCL requested in unsupported units REFLECTANCE). Input jaettu kaistakohtaisiin objekteihin: indeksikaistat REFLECTANCE, SCL DN, dataMask oletus. Koskee MNDWI_EVALSCRIPT, NDCI_EVALSCRIPT, NDCI_EVALSCRIPT_POLYGON. 2026-09-21: kayttajan riippumaton Earth Search -tarkistus paljasti etta yksi P{months*30}D/P{spanDays}D-vali antoi kesan VIIMEISEN pilvettoman kuvan, ei keskiarvoa - korvattu P10D-osavalien mediaanilla (computeMedianOverIntervals, n_intervals_used/n_intervals_total nakyviin) kaikissa: /mndwi, /ndci, /lake-timeseries. SCL==6-vaatimus poistettu NDCI:n polygon-kutsuilta (kattoi mittauksessa vain 35-40% polygonista - NDCI_EVALSCRIPT_POLYGON kayttaa pilvimaskia). Resoluutio: polygon-kutsut AINA kiintea 20m (resolveResolutionM), adaptiivinen VAIN bbox-kutsuille - kalibrointi ja live-arvo eivat olleet vertailukelpoisia (88.8%@52m vs 93.6%@20m). harmonizeValues:true lisatty (Sen2Cor-baseline 04.00-05.11 -yhtenaistys) + units:REFLECTANCE eksplisiittisena. Aiemmat: lastIntervalBehavior=SHORTEN (2026-09-18), resx/resy+MNDWI-pilvimaski+/version (2026-09-17).",
+    changelog_latest: "2026-09-21 (0.9.2): kaistakohtainen input-jako (0.9.1) tulkittiin datafuusioksi - Dataset with id: 1 not found. Palattu yhteen input-objektiin ilman units-kenttaa: oletukset ovat B-kaistoille REFLECTANCE ja SCL/dataMask DN, eli sama kuin eksplisiittinen tavoite. (0.9.1): units:REFLECTANCE koski koko input-lohkoa myos SCL:aa, jota Sentinel Hub tukee vain DN-yksikkona - kaikki 16 /lake-timeseries-kutsua palauttivat HTTP 400 (Invalid script! Band SCL requested in unsupported units REFLECTANCE). Input jaettu kaistakohtaisiin objekteihin: indeksikaistat REFLECTANCE, SCL DN, dataMask oletus. Koskee MNDWI_EVALSCRIPT, NDCI_EVALSCRIPT, NDCI_EVALSCRIPT_POLYGON. 2026-09-21: kayttajan riippumaton Earth Search -tarkistus paljasti etta yksi P{months*30}D/P{spanDays}D-vali antoi kesan VIIMEISEN pilvettoman kuvan, ei keskiarvoa - korvattu P10D-osavalien mediaanilla (computeMedianOverIntervals, n_intervals_used/n_intervals_total nakyviin) kaikissa: /mndwi, /ndci, /lake-timeseries. SCL==6-vaatimus poistettu NDCI:n polygon-kutsuilta (kattoi mittauksessa vain 35-40% polygonista - NDCI_EVALSCRIPT_POLYGON kayttaa pilvimaskia). Resoluutio: polygon-kutsut AINA kiintea 20m (resolveResolutionM), adaptiivinen VAIN bbox-kutsuille - kalibrointi ja live-arvo eivat olleet vertailukelpoisia (88.8%@52m vs 93.6%@20m). harmonizeValues:true lisatty (Sen2Cor-baseline 04.00-05.11 -yhtenaistys) + units:REFLECTANCE eksplisiittisena. Aiemmat: lastIntervalBehavior=SHORTEN (2026-09-18), resx/resy+MNDWI-pilvimaski+/version (2026-09-17).",
     deployed_check: new Date().toISOString()
   });
 }
@@ -525,11 +525,11 @@ function setup() {
     // units: "REFLECTANCE" eksplisiittisena (item 4, kayttajan ohje) - ei
     // jateta oletusarvon varaan, samat yksikot kaikille kasittelyversioille
     // yhdessa harmonizeValues:n kanssa (ks. computeMedianOverIntervals).
-    input: [
-      { bands: ["B03", "B11"], units: "REFLECTANCE" },  // indeksin kaistat
-      { bands: ["SCL"], units: "DN" },                   // luokitus: vain DN tuettu
-      { bands: ["dataMask"] }
-    ],
+    // Yksi input-objekti = yksi datalahde. Useampi objekti tulkitaan
+    // datafuusioksi (0.9.1: "Dataset with id: 1 not found"). units jatetaan
+    // oletukselle: B-kaistat = REFLECTANCE, SCL/dataMask = DN (0.9: SCL ei
+    // tue REFLECTANCE-yksikkoa).
+    input: [{ bands: ["B03", "B11", "SCL", "dataMask"] }],
     output: [
       { id: "data", bands: 1 },
       { id: "water", bands: 1 },
@@ -795,11 +795,11 @@ const NDCI_EVALSCRIPT = `
 //VERSION=3
 function setup() {
   return {
-    input: [
-      { bands: ["B04", "B05"], units: "REFLECTANCE" },  // indeksin kaistat
-      { bands: ["SCL"], units: "DN" },                   // luokitus: vain DN tuettu
-      { bands: ["dataMask"] }
-    ],
+    // Yksi input-objekti = yksi datalahde. Useampi objekti tulkitaan
+    // datafuusioksi (0.9.1: "Dataset with id: 1 not found"). units jatetaan
+    // oletukselle: B-kaistat = REFLECTANCE, SCL/dataMask = DN (0.9: SCL ei
+    // tue REFLECTANCE-yksikkoa).
+    input: [{ bands: ["B04", "B05", "SCL", "dataMask"] }],
     output: [
       { id: "data", bands: 1 },
       { id: "dataMask", bands: 1 }
@@ -829,11 +829,11 @@ const NDCI_EVALSCRIPT_POLYGON = `
 //VERSION=3
 function setup() {
   return {
-    input: [
-      { bands: ["B04", "B05"], units: "REFLECTANCE" },  // indeksin kaistat
-      { bands: ["SCL"], units: "DN" },                   // luokitus: vain DN tuettu
-      { bands: ["dataMask"] }
-    ],
+    // Yksi input-objekti = yksi datalahde. Useampi objekti tulkitaan
+    // datafuusioksi (0.9.1: "Dataset with id: 1 not found"). units jatetaan
+    // oletukselle: B-kaistat = REFLECTANCE, SCL/dataMask = DN (0.9: SCL ei
+    // tue REFLECTANCE-yksikkoa).
+    input: [{ bands: ["B04", "B05", "SCL", "dataMask"] }],
     output: [
       { id: "data", bands: 1 },
       { id: "dataMask", bands: 1 }
