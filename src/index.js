@@ -18,7 +18,7 @@ const CORS = {
 };
 
 // Bumpataan jokaisella BEM-E-korjauskierroksella - /version-reitti (item 4).
-const PROXY_VERSION = "0.9.2-default-units";
+const PROXY_VERSION = "0.9.3-polygon-valid-fraction";
 
 const DEFAULT_BBOX = "26.00,62.40,27.50,63.50"; // Rautalammin reitti pilottialue
 
@@ -120,7 +120,32 @@ function resolveResolutionM(polygonGeoJson, minLon, minLat, maxLon, maxLat) {
 // osavaleista joissa validien (ei-pilvi/ei-nodata) pikselien osuus on
 // vahintaan minValidFraction (oletus 50%) - vahentaa yksittaisten
 // pilvisten/reunatapausten vaikutusta koko kesan yli.
-async function computeMedianOverIntervals(evalscript, bounds, resx, resy, fromISO, toISO, env, maxCloudCoverage = 40, intervalDays = 10, minValidFraction = 0.5) {
+// 0.9.3: polygonin pinta-ala (m²) paikallisella tasoprojektiolla — riittää
+// validien pikselien odotusarvoon (~1 % tarkkuus Suomen leveyksillä).
+function polygonAreaM2(geom) {
+  if (!geom) return null;
+  const polys = geom.type === "Polygon" ? [geom.coordinates] : geom.type === "MultiPolygon" ? geom.coordinates : [];
+  const R = 6371008.8;
+  const ringArea = ring => {
+    const lat0 = ring.reduce((a, c) => a + c[1], 0) / ring.length * Math.PI / 180;
+    let a = 0;
+    for (let i = 0; i < ring.length - 1; i++) {
+      const x1 = ring[i][0] * Math.PI / 180 * R * Math.cos(lat0), y1 = ring[i][1] * Math.PI / 180 * R;
+      const x2 = ring[i+1][0] * Math.PI / 180 * R * Math.cos(lat0), y2 = ring[i+1][1] * Math.PI / 180 * R;
+      a += x1 * y2 - x2 * y1;
+    }
+    return Math.abs(a) / 2;
+  };
+  let total = 0;
+  for (const poly of polys) poly.forEach((ring, k) => { total += (k === 0 ? 1 : -1) * ringArea(ring); });
+  return total;
+}
+
+// 0.9.3: expectedValidPixels. Polygonikyselyssä sampleCount on polygonin
+// BBOXIN pikselimäärä ja polygonin ulkopuoli on noDataa → (sample−noData)/sample
+// jäi aina ~0,24:ään (Iisvesi) eikä yksikään väli läpäissyt 0,5-rajaa.
+// Nyt nimittäjä = polygonin odotettu pikselimäärä, kun polygoni on annettu.
+async function computeMedianOverIntervals(evalscript, bounds, resx, resy, fromISO, toISO, env, maxCloudCoverage = 40, intervalDays = 10, minValidFraction = 0.5, expectedValidPixels = null) {
   const token = await getCopernicusToken(env);
   const statsRequest = {
     input: {
@@ -159,7 +184,7 @@ async function computeMedianOverIntervals(evalscript, bounds, resx, resy, fromIS
     const stats = entry?.outputs?.data?.bands?.B0?.stats;
     if (!stats || !stats.sampleCount) continue;
     const waterStats = entry?.outputs?.water?.bands?.B0?.stats;
-    const validFraction = (stats.sampleCount - stats.noDataCount) / stats.sampleCount;
+    const validFraction = Math.min(1, (stats.sampleCount - stats.noDataCount) / (expectedValidPixels || stats.sampleCount));
     intervals.push({
       from: entry.interval?.from,
       to: entry.interval?.to,
@@ -409,7 +434,7 @@ function handleVersion() {
   return json({
     proxy: "aci-corine-proxy",
     version: PROXY_VERSION,
-    changelog_latest: "2026-09-21 (0.9.2): kaistakohtainen input-jako (0.9.1) tulkittiin datafuusioksi - Dataset with id: 1 not found. Palattu yhteen input-objektiin ilman units-kenttaa: oletukset ovat B-kaistoille REFLECTANCE ja SCL/dataMask DN, eli sama kuin eksplisiittinen tavoite. (0.9.1): units:REFLECTANCE koski koko input-lohkoa myos SCL:aa, jota Sentinel Hub tukee vain DN-yksikkona - kaikki 16 /lake-timeseries-kutsua palauttivat HTTP 400 (Invalid script! Band SCL requested in unsupported units REFLECTANCE). Input jaettu kaistakohtaisiin objekteihin: indeksikaistat REFLECTANCE, SCL DN, dataMask oletus. Koskee MNDWI_EVALSCRIPT, NDCI_EVALSCRIPT, NDCI_EVALSCRIPT_POLYGON. 2026-09-21: kayttajan riippumaton Earth Search -tarkistus paljasti etta yksi P{months*30}D/P{spanDays}D-vali antoi kesan VIIMEISEN pilvettoman kuvan, ei keskiarvoa - korvattu P10D-osavalien mediaanilla (computeMedianOverIntervals, n_intervals_used/n_intervals_total nakyviin) kaikissa: /mndwi, /ndci, /lake-timeseries. SCL==6-vaatimus poistettu NDCI:n polygon-kutsuilta (kattoi mittauksessa vain 35-40% polygonista - NDCI_EVALSCRIPT_POLYGON kayttaa pilvimaskia). Resoluutio: polygon-kutsut AINA kiintea 20m (resolveResolutionM), adaptiivinen VAIN bbox-kutsuille - kalibrointi ja live-arvo eivat olleet vertailukelpoisia (88.8%@52m vs 93.6%@20m). harmonizeValues:true lisatty (Sen2Cor-baseline 04.00-05.11 -yhtenaistys) + units:REFLECTANCE eksplisiittisena. Aiemmat: lastIntervalBehavior=SHORTEN (2026-09-18), resx/resy+MNDWI-pilvimaski+/version (2026-09-17).",
+    changelog_latest: "2026-09-21 (0.9.3): P10D-valien validiosuus laskettiin polygonin BBOXIN pikseleista (sampleCount), jolloin polygonin ulkopuoli oli noDataa ja osuus jai Iisvedella aina ~0,24:aan - 0/12-16 valia lapaisi 0,5-rajan joka vuonna. Nimittaja on nyt polygonin odotettu pikselimaara (polygonAreaM2 / res^2), bbox-kyselyissa ennallaan. (0.9.2): kaistakohtainen input-jako (0.9.1) tulkittiin datafuusioksi - Dataset with id: 1 not found. Palattu yhteen input-objektiin ilman units-kenttaa: oletukset ovat B-kaistoille REFLECTANCE ja SCL/dataMask DN, eli sama kuin eksplisiittinen tavoite. (0.9.1): units:REFLECTANCE koski koko input-lohkoa myos SCL:aa, jota Sentinel Hub tukee vain DN-yksikkona - kaikki 16 /lake-timeseries-kutsua palauttivat HTTP 400 (Invalid script! Band SCL requested in unsupported units REFLECTANCE). Input jaettu kaistakohtaisiin objekteihin: indeksikaistat REFLECTANCE, SCL DN, dataMask oletus. Koskee MNDWI_EVALSCRIPT, NDCI_EVALSCRIPT, NDCI_EVALSCRIPT_POLYGON. 2026-09-21: kayttajan riippumaton Earth Search -tarkistus paljasti etta yksi P{months*30}D/P{spanDays}D-vali antoi kesan VIIMEISEN pilvettoman kuvan, ei keskiarvoa - korvattu P10D-osavalien mediaanilla (computeMedianOverIntervals, n_intervals_used/n_intervals_total nakyviin) kaikissa: /mndwi, /ndci, /lake-timeseries. SCL==6-vaatimus poistettu NDCI:n polygon-kutsuilta (kattoi mittauksessa vain 35-40% polygonista - NDCI_EVALSCRIPT_POLYGON kayttaa pilvimaskia). Resoluutio: polygon-kutsut AINA kiintea 20m (resolveResolutionM), adaptiivinen VAIN bbox-kutsuille - kalibrointi ja live-arvo eivat olleet vertailukelpoisia (88.8%@52m vs 93.6%@20m). harmonizeValues:true lisatty (Sen2Cor-baseline 04.00-05.11 -yhtenaistys) + units:REFLECTANCE eksplisiittisena. Aiemmat: lastIntervalBehavior=SHORTEN (2026-09-18), resx/resy+MNDWI-pilvimaski+/version (2026-09-17).",
     deployed_check: new Date().toISOString()
   });
 }
@@ -601,7 +626,8 @@ async function computeMNDWI(bboxStr, months, env, polygonGeoJson) {
   // pilvettoman kuvan, ei kauden keskiarvoa. computeMedianOverIntervals
   // pilkkoo P10D-osavaleihin ja ottaa mediaanin niista, joissa validien
   // pikselien osuus on riittava.
-  const result = await computeMedianOverIntervals(MNDWI_EVALSCRIPT, bounds, resx, resy, from, to, env, 40);
+  const result = await computeMedianOverIntervals(MNDWI_EVALSCRIPT, bounds, resx, resy, from, to, env, 40, 10, 0.5,
+    polygonGeoJson ? polygonAreaM2(polygonGeoJson) / (resolutionM * resolutionM) : null);
 
   if (result.n_intervals_used === 0) {
     return {
@@ -880,7 +906,8 @@ async function computeNDCI(bboxStr, months, env, polygonGeoJson) {
   // item 1: P10D-osavalien mediaani, ei yhta P{months*30}D-mosaiikkia
   // (joka antoi kauden VIIMEISEN pilvettoman kuvan, ei kesan keskiarvoa -
   // kayttajan riippumaton Earth Search -tarkistus paljasti taman).
-  const result = await computeMedianOverIntervals(evalscript, bounds, resx, resy, from, to, env, 40);
+  const result = await computeMedianOverIntervals(evalscript, bounds, resx, resy, from, to, env, 40, 10, 0.5,
+    polygonGeoJson ? polygonAreaM2(polygonGeoJson) / (resolutionM * resolutionM) : null);
 
   if (result.n_intervals_used === 0) {
     return {
@@ -1069,7 +1096,8 @@ async function runStatsForRange(evalscript, bboxStr, fromISO, toISO, env, maxClo
   // muutos. computeMedianOverIntervals pilkkoo P10D-osavaleihin ja ottaa
   // mediaanin (ks. myos lastIntervalBehavior/spanDays-korjaus 2026-09-18,
   // joka ratkaisi TYHJAN vastauksen mutta ei tata eri bugia).
-  const result = await computeMedianOverIntervals(evalscript, bounds, resx, resy, fromISO, toISO, env, maxCloudCoverage);
+  const result = await computeMedianOverIntervals(evalscript, bounds, resx, resy, fromISO, toISO, env, maxCloudCoverage, 10, 0.5,
+    polygonGeoJson ? polygonAreaM2(polygonGeoJson) / (resolutionM * resolutionM) : null);
 
   if (result.n_intervals_used === 0) {
     throw new Error(`0 kaytettavaa P10D-osavalia (n_intervals_total=${result.n_intervals_total}) - tarkista pilvipeite/aikavali.`);
