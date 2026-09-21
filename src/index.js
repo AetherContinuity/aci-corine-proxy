@@ -18,7 +18,7 @@ const CORS = {
 };
 
 // Bumpataan jokaisella BEM-E-korjauskierroksella - /version-reitti (item 4).
-const PROXY_VERSION = "0.9.4-calibrated-baseline";
+const PROXY_VERSION = "0.9.5-per-polygon-baseline";
 
 const DEFAULT_BBOX = "26.00,62.40,27.50,63.50"; // Rautalammin reitti pilottialue
 
@@ -434,7 +434,7 @@ function handleVersion() {
   return json({
     proxy: "aci-corine-proxy",
     version: PROXY_VERSION,
-    changelog_latest: "2026-09-21 (0.9.4): ENSIMMAINEN onnistunut kalibrointiajo (/lake-timeseries?polygon=iisvesi_raw&indices=mndwi,ndci&startYear=2018&endYear=2025, 20m, kaikki 8 vuotta laskettu, 9-14 kayttokelpoista P10D-valia/vuosi). Vesiosuus: mediaani 91.65%, keskihajonta 1.69pp, vaihteluvali 88.1-94.1% - korvaa arvioidun 95%:n rajan (IISVESI_RAW_EXPECTED_WATER_FRACTION_PCT_MIN poistettu, tilalla IISVESI_RAW_WATER_FRACTION_BASELINE {median,sd,range}; poikkeama = |havainto-91.65|>2*keskihajonta). NDCI: mediaani 0.0168, keskihajonta 0.0136 (IISVESI_NDCI_BASELINE) - vuosien 2024-2025 aiempi romahdus (-0.31/-0.57) vahvistui 0.9.1-0.9.3:n laskentavirheeksi, ei jarven muutokseksi (kayttajan riippumaton Earth Search -tarkistus: -0.012...0.035, sopusoinnussa). Vesiosuudella EI korrelaatiota Iisveden mitatun kesan keskivedenkorkeuden kanssa (r=0.06, SYKE-asema 1966, 2018-2025, esim. 2022: jakson pienin vesiosuus, suurin vedenkorkeus) - vuosien valinen vaihtelu johtuu vesikasvillisuudesta/heijastuksista/kelpuutetuista P10D-valeista, EI kuivuudesta; kuivuus mitataan HEM:ssa SYKE-sarjoilla (§02). (0.9.3): P10D-valien validiosuus laskettiin polygonin BBOXIN pikseleista (sampleCount), jolloin polygonin ulkopuoli oli noDataa ja osuus jai Iisvedella aina ~0,24:aan - 0/12-16 valia lapaisi 0,5-rajan joka vuonna. Nimittaja on nyt polygonin odotettu pikselimaara (polygonAreaM2 / res^2), bbox-kyselyissa ennallaan. (0.9.2): kaistakohtainen input-jako (0.9.1) tulkittiin datafuusioksi - Dataset with id: 1 not found. Palattu yhteen input-objektiin ilman units-kenttaa: oletukset ovat B-kaistoille REFLECTANCE ja SCL/dataMask DN, eli sama kuin eksplisiittinen tavoite. (0.9.1): units:REFLECTANCE koski koko input-lohkoa myos SCL:aa, jota Sentinel Hub tukee vain DN-yksikkona - kaikki 16 /lake-timeseries-kutsua palauttivat HTTP 400 (Invalid script! Band SCL requested in unsupported units REFLECTANCE). Input jaettu kaistakohtaisiin objekteihin: indeksikaistat REFLECTANCE, SCL DN, dataMask oletus. Koskee MNDWI_EVALSCRIPT, NDCI_EVALSCRIPT, NDCI_EVALSCRIPT_POLYGON. 2026-09-21: kayttajan riippumaton Earth Search -tarkistus paljasti etta yksi P{months*30}D/P{spanDays}D-vali antoi kesan VIIMEISEN pilvettoman kuvan, ei keskiarvoa - korvattu P10D-osavalien mediaanilla (computeMedianOverIntervals, n_intervals_used/n_intervals_total nakyviin) kaikissa: /mndwi, /ndci, /lake-timeseries. SCL==6-vaatimus poistettu NDCI:n polygon-kutsuilta (kattoi mittauksessa vain 35-40% polygonista - NDCI_EVALSCRIPT_POLYGON kayttaa pilvimaskia). Resoluutio: polygon-kutsut AINA kiintea 20m (resolveResolutionM), adaptiivinen VAIN bbox-kutsuille - kalibrointi ja live-arvo eivat olleet vertailukelpoisia (88.8%@52m vs 93.6%@20m). harmonizeValues:true lisatty (Sen2Cor-baseline 04.00-05.11 -yhtenaistys) + units:REFLECTANCE eksplisiittisena. Aiemmat: lastIntervalBehavior=SHORTEN (2026-09-18), resx/resy+MNDWI-pilvimaski+/version (2026-09-17).",
+    changelog_latest: "2026-09-21 (0.9.5): (1) NDCI-perusarvot polygonikohtaisiksi - /ndci kayttaa -40 m puskuroitua polygonia (iisvesi), mutta 0.9.4:n perusarvo 0.0168 oli rajaamattomasta (iisvesi_raw); live -0.023 halytti virheellisesti. Uudelleenkalibroitu iisvesi: mediaani -0.0015, sd 0.0160 (rantapikselit nostivat NDCI:ta ~0.018). Vesiosuuden perusarvo vain iisvesi_raw:lle. (2) Kausi-ikkuna: polygonikutsu ilman ?months= laskee 1.5.->nyt (touko-syyskuu), sama ikkuna kuin perusarvoissa; ?months= antaa anomaly=null. comparison_window-kentta vastaukseen. (3) /ndci hyvaksyy myos ?polygon=iisvesi_raw. (4) Vanhentuneet EI VIELA live-testattu -tekstit poistettu /mndwi- ja /ndci-reiteilta. (0.9.4): ENSIMMAINEN onnistunut kalibrointiajo (/lake-timeseries?polygon=iisvesi_raw&indices=mndwi,ndci&startYear=2018&endYear=2025, 20m, kaikki 8 vuotta laskettu, 9-14 kayttokelpoista P10D-valia/vuosi). Vesiosuus: mediaani 91.65%, keskihajonta 1.69pp, vaihteluvali 88.1-94.1% - korvaa arvioidun 95%:n rajan (IISVESI_RAW_EXPECTED_WATER_FRACTION_PCT_MIN poistettu, tilalla IISVESI_RAW_WATER_FRACTION_BASELINE {median,sd,range}; poikkeama = |havainto-91.65|>2*keskihajonta). NDCI: mediaani 0.0168, keskihajonta 0.0136 (IISVESI_NDCI_BASELINE) - vuosien 2024-2025 aiempi romahdus (-0.31/-0.57) vahvistui 0.9.1-0.9.3:n laskentavirheeksi, ei jarven muutokseksi (kayttajan riippumaton Earth Search -tarkistus: -0.012...0.035, sopusoinnussa). Vesiosuudella EI korrelaatiota Iisveden mitatun kesan keskivedenkorkeuden kanssa (r=0.06, SYKE-asema 1966, 2018-2025, esim. 2022: jakson pienin vesiosuus, suurin vedenkorkeus) - vuosien valinen vaihtelu johtuu vesikasvillisuudesta/heijastuksista/kelpuutetuista P10D-valeista, EI kuivuudesta; kuivuus mitataan HEM:ssa SYKE-sarjoilla (§02). (0.9.3): P10D-valien validiosuus laskettiin polygonin BBOXIN pikseleista (sampleCount), jolloin polygonin ulkopuoli oli noDataa ja osuus jai Iisvedella aina ~0,24:aan - 0/12-16 valia lapaisi 0,5-rajan joka vuonna. Nimittaja on nyt polygonin odotettu pikselimaara (polygonAreaM2 / res^2), bbox-kyselyissa ennallaan. (0.9.2): kaistakohtainen input-jako (0.9.1) tulkittiin datafuusioksi - Dataset with id: 1 not found. Palattu yhteen input-objektiin ilman units-kenttaa: oletukset ovat B-kaistoille REFLECTANCE ja SCL/dataMask DN, eli sama kuin eksplisiittinen tavoite. (0.9.1): units:REFLECTANCE koski koko input-lohkoa myos SCL:aa, jota Sentinel Hub tukee vain DN-yksikkona - kaikki 16 /lake-timeseries-kutsua palauttivat HTTP 400 (Invalid script! Band SCL requested in unsupported units REFLECTANCE). Input jaettu kaistakohtaisiin objekteihin: indeksikaistat REFLECTANCE, SCL DN, dataMask oletus. Koskee MNDWI_EVALSCRIPT, NDCI_EVALSCRIPT, NDCI_EVALSCRIPT_POLYGON. 2026-09-21: kayttajan riippumaton Earth Search -tarkistus paljasti etta yksi P{months*30}D/P{spanDays}D-vali antoi kesan VIIMEISEN pilvettoman kuvan, ei keskiarvoa - korvattu P10D-osavalien mediaanilla (computeMedianOverIntervals, n_intervals_used/n_intervals_total nakyviin) kaikissa: /mndwi, /ndci, /lake-timeseries. SCL==6-vaatimus poistettu NDCI:n polygon-kutsuilta (kattoi mittauksessa vain 35-40% polygonista - NDCI_EVALSCRIPT_POLYGON kayttaa pilvimaskia). Resoluutio: polygon-kutsut AINA kiintea 20m (resolveResolutionM), adaptiivinen VAIN bbox-kutsuille - kalibrointi ja live-arvo eivat olleet vertailukelpoisia (88.8%@52m vs 93.6%@20m). harmonizeValues:true lisatty (Sen2Cor-baseline 04.00-05.11 -yhtenaistys) + units:REFLECTANCE eksplisiittisena. Aiemmat: lastIntervalBehavior=SHORTEN (2026-09-18), resx/resy+MNDWI-pilvimaski+/version (2026-09-17).",
     deployed_check: new Date().toISOString()
   });
 }
@@ -452,9 +452,9 @@ function handleStatus() {
       "/fragmentation": "Grid-sampled CORINE D_f proxy · ?bbox=...&grid=7 (n x n points, max 7x7)",
       "/ndvi": "Sentinel Hub Statistical API — NDVI mean/stDev over bbox · ?bbox=...&months=3 · adaptiivinen resoluutio (20-193m riippuen bbox:in koosta, ks. resolution_m) · HUOM stDev ennen v0.6 ei ole vertailukelpoinen (oli ~500m/px DEFAULT_BBOX:lla)",
       "/ndvi-image": "Sentinel Hub Process API — renderoitu NDVI-kuva (vihrea-keltainen-punainen) · ?bbox=...&months=3&w=480&h=350",
-      "/mndwi": "BEM-E (Aquatic Extension) — MNDWI [A-luokka] · ?bbox=26.695,62.666,27.051,63.004&months=3 (Iisvesi-ryhma, adaptiivinen resoluutio) TAI ?polygon=iisvesi_raw (jarvi-kohtainen, kalibroitu perusarvo mediaani 91.65%±1.69pp, kiintea 20m) · mediaani P10D-osavaleista (n_intervals_used), SCL-pilvimaski, harmonizeValues · EI VIELA live-testattu",
+      "/mndwi": "BEM-E (Aquatic Extension) — MNDWI [A-luokka] · ?bbox=26.695,62.666,27.051,63.004&months=3 (Iisvesi-ryhma, adaptiivinen resoluutio) TAI ?polygon=iisvesi_raw (jarvi-kohtainen, kalibroitu perusarvo mediaani 91.65%±1.69pp, kiintea 20m) · mediaani P10D-osavaleista (n_intervals_used), SCL-pilvimaski, harmonizeValues · polygon ilman months-parametria = kausi-ikkuna 1.5.->nyt ja poikkeamavertailu · live-testattu 2026-09-21",
       "/mndwi-image": "BEM-E — renderoitu MNDWI-kuva (ruskea-vihrea-sininen) · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
-      "/ndci": "BEM-E — NDCI [B-luokka, KOKEELLINEN] · ?bbox=...&months=3 (SCL==6-vaatimus, adaptiivinen resoluutio) TAI ?polygon=iisvesi (-40m rantapuskuroitu, 137.4 km^2) TAI ?polygon=<oma GeoJSON>&months=3 (pilvimaski, EI SCL==6, kiintea 20m) · mediaani P10D-osavaleista, harmonizeValues · EI VIELA live-testattu",
+      "/ndci": "BEM-E — NDCI [B-luokka, KOKEELLINEN] · ?bbox=...&months=3 (SCL==6-vaatimus, adaptiivinen resoluutio) TAI ?polygon=iisvesi (-40m rantapuskuroitu, 137.4 km^2) TAI ?polygon=<oma GeoJSON>&months=3 (pilvimaski, EI SCL==6, kiintea 20m) · mediaani P10D-osavaleista, harmonizeValues · perusarvot polygonikohtaisia (iisvesi -0.0015 / iisvesi_raw 0.0168) · polygon ilman months-parametria = kausi-ikkuna 1.5.->nyt ja poikkeamavertailu · live-testattu 2026-09-21",
       "/ndci-image": "BEM-E — renderoitu NDCI-kuva (sininen-vihrea-keltainen-punainen) [B-luokka] · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
       "/lake-timeseries": "BEM-E — takautuva kesakauden (touko-syyskuu) MNDWI+NDCI-aikasarja, P10D-mediaani per vuosi · ?bbox=...&startYear=2018&endYear=2025&indices=mndwi,ndci TAI ?polygon=iisvesi_raw (kalibroitu 2026-09-21, ks. IISVESI_RAW_WATER_FRACTION_BASELINE/IISVESI_NDCI_BASELINE-kommentit) · live-testattu · yksi API-kutsu per vuosi per indeksi · HUOM: startYear<2018 EI TUETTU, L2A ei systemaattista Euroopassa ennen 2017-05",
       "/catalog-check": "Diagnostiikka - STAC Catalog API -haku, tarkistaa onko Sentinel-2 L2A -skeneja olemassa JA Sen2Cor processing_baseline -yhtenaisyys (SCL-vesiluokan vertailukelpoisuus) · ?bbox=...&from=...&to=... (ISO 8601)",
@@ -611,13 +611,38 @@ const IISVESI_RAW_WATER_FRACTION_BASELINE = {
 // (-0.012...0.035) tayttyy talla perusarvolla.
 const IISVESI_NDCI_BASELINE = { median: 0.0168, sd: 0.0136, years: "2018-2025" };
 
-async function computeMNDWI(bboxStr, months, env, polygonGeoJson) {
+// 0.9.5: perusarvot POLYGONIKOHTAISIKSI. /ndci kayttaa oletuksena -40 m
+// puskuroitua polygonia (iisvesi), mutta 0.9.4:n NDCI-perusarvo laskettiin
+// rajaamattomasta (iisvesi_raw) -> live-arvo -0.023 hälytti virheellisesti.
+// Uudelleenkalibrointi 2026-09-21 samalla polygonilla (/lake-timeseries
+// ?polygon=iisvesi&indices=ndci, 20 m, 8/8 vuotta, 9-14 valia/v):
+// mediaani -0.0015, sd 0.0160. Rantapikselit nostivat NDCI:ta ~0.018.
+const WATER_FRACTION_BASELINES = { iisvesi_raw: IISVESI_RAW_WATER_FRACTION_BASELINE };
+const NDCI_BASELINES = {
+  iisvesi:     { median: -0.0015, sd: 0.0160, years: "2018-2025", polygon: "iisvesi (-40 m)" },
+  iisvesi_raw: { ...IISVESI_NDCI_BASELINE, polygon: "iisvesi_raw (rajaamaton)" }
+};
+// Perusarvot on laskettu kesaikkunasta 1.5.-1.10. Live-vertailu tehdaan vain
+// samalla kausi-ikkunalla: 1.5. -> nyt (touko-syyskuu), muuten edellisen
+// kesan koko ikkuna. Eksplisiittinen ?months= ohittaa taman, jolloin
+// anomaly = null (ikkuna ei vertailukelpoinen).
+function seasonWindow(now) {
+  const y = now.getUTCFullYear(), m = now.getUTCMonth() + 1;
+  // Alle 10 vrk kauden alusta -> ei yhtaan P10D-valia; kaytetaan edellista kesaa.
+  const early = m === 5 && now.getUTCDate() <= 10;
+  if (m >= 5 && m <= 9 && !early) return { from: new Date(Date.UTC(y, 4, 1)).toISOString(), to: now.toISOString(), season: `${y} touko->nyt` };
+  const yy = (m < 5 || early) ? y - 1 : y;
+  return { from: new Date(Date.UTC(yy, 4, 1)).toISOString(), to: new Date(Date.UTC(yy, 9, 1)).toISOString(), season: `${yy} touko-syyskuu (kausi paattynyt)` };
+}
+
+async function computeMNDWI(bboxStr, months, env, polygonGeoJson, opts = {}) {
   if (!env.COPERNICUS_CLIENT_ID || !env.COPERNICUS_CLIENT_SECRET) {
     throw new Error("COPERNICUS_CLIENT_ID / COPERNICUS_CLIENT_SECRET not configured (wrangler secret put ...)");
   }
   const now = new Date();
-  const to = now.toISOString();
-  const from = new Date(now.getTime() - months * 30 * 24 * 3600 * 1000).toISOString();
+  const sw = opts.useSeason ? seasonWindow(now) : null;
+  const to = sw ? sw.to : now.toISOString();
+  const from = sw ? sw.from : new Date(now.getTime() - months * 30 * 24 * 3600 * 1000).toISOString();
 
   const [minLon, minLat, maxLon, maxLat] = polygonGeoJson
     ? geometryBounds(polygonGeoJson)
@@ -647,10 +672,13 @@ async function computeMNDWI(bboxStr, months, env, polygonGeoJson) {
   const waterFractionPct = result.median_water_fraction_pct;
 
   let expectedWaterFractionPct = null, waterFractionAnomaly = null, expectedWaterFractionNote = undefined;
-  if (polygonGeoJson) {
-    const baseline = IISVESI_RAW_WATER_FRACTION_BASELINE;
+  const wBase = polygonGeoJson ? WATER_FRACTION_BASELINES[opts.polygonKey] : null;
+  if (polygonGeoJson && !wBase) {
+    expectedWaterFractionNote = `Ei perusarvoa polygonille ${opts.polygonKey || "custom"} - vertailu vain ?polygon=iisvesi_raw.`;
+  } else if (polygonGeoJson) {
+    const baseline = wBase;
     expectedWaterFractionPct = baseline.median;
-    waterFractionAnomaly = waterFractionPct == null ? null :
+    waterFractionAnomaly = (waterFractionPct == null || !opts.useSeason) ? null :
       Math.abs(waterFractionPct - baseline.median) > 2 * baseline.sd;
     expectedWaterFractionNote = `Kalibroitu perusarvo (mediaani ${baseline.years}, ${baseline.method}, ${baseline.res_m}m): ${baseline.median}% (keskihajonta ${baseline.sd}pp, vaihteluvali ${baseline.range[0]}-${baseline.range[1]}%). Poikkeama = |havainto - ${baseline.median}| > 2*keskihajonta (~${(baseline.median - 2 * baseline.sd).toFixed(1)}-${(baseline.median + 2 * baseline.sd).toFixed(1)}%). ${baseline.note}`;
   } else if (bboxStr === IISVESI_BBOX) {
@@ -669,6 +697,7 @@ async function computeMNDWI(bboxStr, months, env, polygonGeoJson) {
     water_threshold: MNDWI_WATER_THRESHOLD,
     expected_water_fraction_pct: expectedWaterFractionPct,
     water_fraction_anomaly: waterFractionAnomaly,
+    comparison_window: sw ? sw.season : "months-ikkuna - EI vertailukelpoinen perusarvon (touko-syyskuu) kanssa, anomaly=null",
     grade: "A - vakiintunut (Xu 2006)",
     source: "Sentinel Hub Statistical API (Copernicus Data Space Ecosystem), Sentinel-2 L2A",
     caveat_water_fraction: waterFractionPct == null
@@ -706,7 +735,9 @@ async function handleMNDWI(url, env) {
   }
 
   try {
-    const result = await computeMNDWI(bboxStr, months, env, polygonGeoJson);
+    const polygonKey = polygonStr === "iisvesi_raw" || polygonStr === "iisvesi" ? polygonStr : (polygonGeoJson ? "custom" : null);
+    const useSeason = !!polygonGeoJson && !url.searchParams.has("months");
+    const result = await computeMNDWI(bboxStr, months, env, polygonGeoJson, { polygonKey, useSeason });
     return json({
       bem_e_component: "MNDWI (Aquatic Extension, A-luokka)",
       method: "sentinel_hub_statistical_api",
@@ -714,7 +745,7 @@ async function handleMNDWI(url, env) {
       used_polygon: !!polygonGeoJson,
       polygon_source: polygonSource,
       ...result,
-      caveat: "EI VIELA live-testattu tallle nimenomaiselle bbox:ille/polygonille (kirjoitettu 2026-07-26, polygon-tuki+resx/resy 2026-09-17, P10D-mediaani+harmonizeValues 2026-09-21). Mediaani P10D-osavaleista koko aikaikkunan yli (ei spatiaalinen ruudukko, ei yhden kuvan arvo) - ks. n_intervals_used/n_intervals_total."
+      caveat: "Live-testattu 2026-09-21 (0.9.4-0.9.5) polygoneilla iisvesi_raw ja iisvesi. Mediaani P10D-osavaleista koko aikaikkunan yli (ei spatiaalinen ruudukko, ei yhden kuvan arvo) - ks. n_intervals_used/n_intervals_total."
     });
   } catch (e) {
     return json({ error: e.message, step: "mndwi" }, 502);
@@ -890,13 +921,14 @@ function evaluatePixel(samples) {
 }
 `;
 
-async function computeNDCI(bboxStr, months, env, polygonGeoJson) {
+async function computeNDCI(bboxStr, months, env, polygonGeoJson, opts = {}) {
   if (!env.COPERNICUS_CLIENT_ID || !env.COPERNICUS_CLIENT_SECRET) {
     throw new Error("COPERNICUS_CLIENT_ID / COPERNICUS_CLIENT_SECRET not configured (wrangler secret put ...)");
   }
   const now = new Date();
-  const to = now.toISOString();
-  const from = new Date(now.getTime() - months * 30 * 24 * 3600 * 1000).toISOString();
+  const sw = opts.useSeason ? seasonWindow(now) : null;
+  const to = sw ? sw.to : now.toISOString();
+  const from = sw ? sw.from : new Date(now.getTime() - months * 30 * 24 * 3600 * 1000).toISOString();
 
   const [minLon, minLat, maxLon, maxLat] = polygonGeoJson
     ? geometryBounds(polygonGeoJson)
@@ -931,12 +963,15 @@ async function computeNDCI(bboxStr, months, env, polygonGeoJson) {
   // Kalibrointi (2026-09-21, ks. IISVESI_NDCI_BASELINE-kommentti):
   // odotusarvo vain polygon-kutsuille - bbox kattaa muutakin kuin Iisveden.
   let expectedNdci = null, ndciAnomaly = null, expectedNdciNote = undefined;
-  if (polygonGeoJson) {
-    const baseline = IISVESI_NDCI_BASELINE;
+  const nBase = polygonGeoJson ? NDCI_BASELINES[opts.polygonKey] : null;
+  if (polygonGeoJson && !nBase) {
+    expectedNdciNote = `Ei perusarvoa polygonille ${opts.polygonKey || "custom"} - vertailu vain ?polygon=iisvesi tai iisvesi_raw.`;
+  } else if (polygonGeoJson) {
+    const baseline = nBase;
     expectedNdci = baseline.median;
-    ndciAnomaly = result.median_mean == null ? null :
+    ndciAnomaly = (result.median_mean == null || !opts.useSeason) ? null :
       Math.abs(result.median_mean - baseline.median) > 2 * baseline.sd;
-    expectedNdciNote = `Kalibroitu perusarvo (mediaani ${baseline.years}, P10D-mediaani per vuosi): ${baseline.median} (keskihajonta ${baseline.sd}). Poikkeama = |havainto - ${baseline.median}| > 2*keskihajonta.`;
+    expectedNdciNote = `Kalibroitu perusarvo polygonille ${baseline.polygon} (mediaani ${baseline.years}, touko-syyskuu, P10D-mediaani per vuosi): ${baseline.median} (keskihajonta ${baseline.sd}). Poikkeama = |havainto - ${baseline.median}| > 2*keskihajonta.`;
   }
 
   return {
@@ -948,6 +983,7 @@ async function computeNDCI(bboxStr, months, env, polygonGeoJson) {
     ndci_mean: result.median_mean,
     expected_ndci: expectedNdci,
     ndci_anomaly: ndciAnomaly,
+    comparison_window: sw ? sw.season : "months-ikkuna - EI vertailukelpoinen perusarvon (touko-syyskuu) kanssa, anomaly=null",
     grade: "B - KOKEELLINEN (Mishra & Mishra 2012, merkitty kokeelliseksi Sentinel-2:lle virallisen dokumentaation mukaan)",
     masking: polygonGeoJson
       ? "Polygon-tila: SCL-pilvimaski (0,1,3,8,9,10), EI SCL==6-vaatimusta - jarven rajaus tulee polygonista (item 2)."
@@ -974,17 +1010,22 @@ async function handleNDCI(url, env) {
     // analyysi 2026-09-17): 137.4 km^2, 8 osaa, 3089 karkea, EPSG:4326.
     polygonGeoJson = IISVESI_MASK.features[0].geometry;
     polygonSource = "iisvesi (sisainen, " + IISVESI_MASK.features[0].properties.area_km2 + " km^2)";
+  } else if (polygonStr === "iisvesi_raw") {
+    polygonGeoJson = IISVESI_RAW_MASK.features[0].geometry;
+    polygonSource = "iisvesi_raw (sisainen, rajaamaton, " + IISVESI_RAW_MASK.features[0].properties.area_km2 + " km^2)";
   } else if (polygonStr) {
     try {
       polygonGeoJson = JSON.parse(polygonStr);
       polygonSource = "custom";
     } catch (e) {
-      return json({ error: `polygon ei ole kelvollista GeoJSON:ia (eika avainsana "iisvesi"): ${e.message}` }, 400);
+      return json({ error: `polygon ei ole kelvollista GeoJSON:ia (eika avainsana "iisvesi"/"iisvesi_raw"): ${e.message}` }, 400);
     }
   }
 
   try {
-    const result = await computeNDCI(bboxStr, months, env, polygonGeoJson);
+    const polygonKey = polygonStr === "iisvesi_raw" || polygonStr === "iisvesi" ? polygonStr : (polygonGeoJson ? "custom" : null);
+    const useSeason = !!polygonGeoJson && !url.searchParams.has("months");
+    const result = await computeNDCI(bboxStr, months, env, polygonGeoJson, { polygonKey, useSeason });
     return json({
       bem_e_component: "NDCI (Aquatic Extension, B-luokka - KOKEELLINEN)",
       method: "sentinel_hub_statistical_api",
@@ -995,7 +1036,7 @@ async function handleNDCI(url, env) {
         ? "Kaytetty ?polygon= -geometriaa bbox:in sijaan - jos polygoni on puskuroitu rantaviivasta sisaanpain, tama vastaa vesimaskin kaventamista (item 5b) ilman rasterikasittelya."
         : "EI kaytetty - bbox sisaltaa koko rantaviivan, ei eroosiota (ks. item 5b -kommentti computeNDCI:n yla puolella). Kokeile ?polygon=iisvesi.",
       ...result,
-      caveat: "EI VIELA live-testattu tallle nimenomaiselle bbox:ille/polygonille (kirjoitettu 2026-07-26, polygon-tuki 2026-09-17, P10D-mediaani+SCL-korjaus+harmonizeValues 2026-09-21). Mediaani P10D-osavaleista - ks. n_intervals_used/n_intervals_total ja masking-kentta (SCL-logiikka riippuu bbox/polygon-tilasta).",
+      caveat: "Live-testattu 2026-09-21 (0.9.4-0.9.5) polygoneilla iisvesi ja iisvesi_raw. Mediaani P10D-osavaleista - ks. n_intervals_used/n_intervals_total ja masking-kentta (SCL-logiikka riippuu bbox/polygon-tilasta).",
       caveat_polygon_size: polygonGeoJson
         ? "iisvesi-maski: 8 osaa, 3089 karkea (~127kB GeoJSON). Jos Statistics API hylkaa geometrian koon vuoksi (HTTP 400/413), yksinkertaista offline Python/shapely-simplify(tolerance=40, preserve_topology=True):lla ja korvaa src/iisvesi_ndci_mask.json - TATA EI voi tehda Workerissa (ei shapelya/geometriakirjastoa JS-runtimessa)."
         : undefined,
