@@ -1,4 +1,9 @@
 // aci-corine-proxy
+// (Tyhja build-korjaus 2026-09-22: kaksi rinnakkaista Cloudflare-buildia,
+// main ja claude/hem-fixes, kilpaili tuotantojulkaisusta - viimeksi
+// valmistuva voitti riippumatta versiosta, jolloin 0.9.6 korvasi 0.9.7:n
+// ~35s myohemmin. Tama commit laukaisee taman haaran uuden buildin nyt
+// kun molemmilla haaroilla on 0.9.7 - jarjestys ei enaa vaikuta lopputulokseen.)
 // D_f (fragmentaatio) -datalähde BEM:lle (Biodiversity Endurance Monitor).
 // Hakee SYKE:n avoimesta inspire_lc WMS -rajapinnasta (CorineLandCover2018),
 // ei autentikointia. Katso: https://ckan.ymparisto.fi/dataset/syke-maanpeite-wcs
