@@ -18,7 +18,7 @@ const CORS = {
 };
 
 // Bumpataan jokaisella BEM-E-korjauskierroksella - /version-reitti (item 4).
-const PROXY_VERSION = "0.9.7-ndci-bbox-hint";
+const PROXY_VERSION = "0.9.8-syke-eo";
 
 const DEFAULT_BBOX = "26.00,62.40,27.50,63.50"; // Rautalammin reitti pilottialue
 
@@ -235,6 +235,31 @@ const PS_LAYERS = [
 const FOREST_CLASSES = new Set([311, 312, 313]); // CLC level3: metsätyypit
 const WATER_CLASSES = new Set([511, 512]); // CLC level3: joet/kanavat, järvet — vastaa NDVI:n SCL==6-vesimaskia
 const REF_FOREST_AREA_M2 = 10_000_000; // 10 km² viite "ehjälle" metsälaikulle — dokumentoitu arvio, ei standardi
+
+
+// 0.9.8 (2026-10-30): SYKE:n EO-vedenlaatutuotteet. Isanta ei ole Clauden
+// hiekkalaatikon sallituissa osoitteissa, joten haku kulkee Workerin kautta.
+// Rajattu yhteen isantaan ja polkuun: ?svc valitsee palvelun, muut
+// parametrit valitetaan sellaisenaan. Vastaus palautetaan alkuperaisella
+// Content-Typella (XML, JSON, PNG, GeoTIFF).
+const SYKE_EO_BASE = "https://geoserver2.ymparisto.fi/geoserver/eo/";
+async function handleSykeEo(url) {
+  const svc = (url.searchParams.get("svc") || "wms").toLowerCase();
+  if (!["wms", "wcs", "ows", "wfs"].includes(svc)) {
+    return json({ error: "svc: wms | wcs | ows | wfs" }, 400);
+  }
+  const qs = new URLSearchParams(url.search);
+  qs.delete("svc");
+  if ([...qs.keys()].length === 0) {
+    return json({ error: "OGC-parametrit puuttuvat, esim. ?svc=wms&service=WMS&request=GetCapabilities" }, 400);
+  }
+  const upstream = SYKE_EO_BASE + svc + "?" + qs.toString();
+  const r = await fetch(upstream, { headers: { "User-Agent": "ACI-corine-proxy" }, cf: { cacheTtl: 3600 } });
+  const h = new Headers(CORS);
+  h.set("Content-Type", r.headers.get("Content-Type") || "application/octet-stream");
+  h.set("X-Upstream", upstream);
+  return new Response(r.body, { status: r.status, headers: h });
+}
 
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj, null, 2), {
@@ -456,6 +481,7 @@ function handleStatus() {
       "/mndwi-image": "BEM-E — renderoitu MNDWI-kuva (ruskea-vihrea-sininen) · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
       "/ndci": "BEM-E — NDCI [B-luokka, KOKEELLINEN] · ?bbox=...&months=3 (SCL==6-vaatimus, adaptiivinen resoluutio) TAI ?polygon=iisvesi (-40m rantapuskuroitu, 137.4 km^2) TAI ?polygon=<oma GeoJSON>&months=3 (pilvimaski, EI SCL==6, kiintea 20m) · mediaani P10D-osavaleista, harmonizeValues · perusarvot polygonikohtaisia (iisvesi -0.0015 / iisvesi_raw 0.0168) · polygon ilman months-parametria = kausi-ikkuna 1.5.->nyt ja poikkeamavertailu · live-testattu 2026-09-21",
       "/ndci-image": "BEM-E — renderoitu NDCI-kuva (sininen-vihrea-keltainen-punainen) [B-luokka] · ?bbox=...&months=3&w=480&h=480 · EI VIELA live-testattu",
+      "/syke-eo": "SYKE:n EO-vedenlaatutuotteet (geoserver2.ymparisto.fi/geoserver/eo) lapikulkuna · ?svc=wms|wcs|ows + alkuperaiset OGC-parametrit (esim. request=GetCapabilities, GetFeatureInfo, GetCoverage) · rajattu tahan isantaan ja polkuun, ei yleinen valityspalvelin · lisatty 2026-10-30 nakosyvyysaineiston (EO_HR_WQ_S2_SDT) jarvikohtaista hakua varten",
       "/lake-timeseries": "BEM-E — takautuva kesakauden (touko-syyskuu) MNDWI+NDCI-aikasarja, P10D-mediaani per vuosi · ?bbox=...&startYear=2018&endYear=2025&indices=mndwi,ndci TAI ?polygon=iisvesi_raw (kalibroitu 2026-09-21, ks. IISVESI_RAW_WATER_FRACTION_BASELINE/IISVESI_NDCI_BASELINE-kommentit) · live-testattu · yksi API-kutsu per vuosi per indeksi · HUOM: startYear<2018 EI TUETTU, L2A ei systemaattista Euroopassa ennen 2017-05",
       "/catalog-check": "Diagnostiikka - STAC Catalog API -haku, tarkistaa onko Sentinel-2 L2A -skeneja olemassa JA Sen2Cor processing_baseline -yhtenaisyys (SCL-vesiluokan vertailukelpoisuus) · ?bbox=...&from=...&to=... (ISO 8601)",
       "/combined": "CORINE + NDVI rinnakkain, ristiintarkistus, yhdistetty D_f · ?bbox=...&grid=6&months=3",
@@ -1788,6 +1814,8 @@ export default {
         return await handleNDCI(url, env);
       } else if (path === "/ndci-image") {
         return await handleNDCIImage(url, env);
+      } else if (path === "/syke-eo") {
+        return await handleSykeEo(url);
       } else if (path === "/lake-timeseries") {
         return await handleLakeTimeseries(url, env);
       } else if (path === "/catalog-check") {
